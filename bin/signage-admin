@@ -108,7 +108,7 @@ case "$cmd" in
         cur="$("$PY" -c 'import configparser;c=configparser.ConfigParser(interpolation=None);c.read("/etc/signage/player.ini");print(c.get("player","renderer",fallback="auto"))')"
         fails="$(cat /var/lib/signage/player/browser-failures 2>/dev/null || echo 0)"
         case "${2:-}" in
-            "") echo "Weergave: $cur (mislukte browserstarts: $fails)" ;;
+            "") echo "Weergave: $cur (mislukte browserstarts: $fails, variant compositor: $(cat /var/lib/signage/player/browser-variant 2>/dev/null || echo 0))" ;;
             auto|browser|mpv)
                 need_root renderer
                 "$PY" - "$2" <<'PY'
@@ -122,12 +122,14 @@ open(p, "w", encoding="utf-8").write(s)
 PY
                 echo 0 > /var/lib/signage/player/browser-failures
                 chown signage:signage /var/lib/signage/player/browser-failures
+                rm -f /var/lib/signage/player/browser-variant
                 systemctl restart signage-player.service
                 echo "Weergave ingesteld op $2; player herstart." ;;
             reset)
                 need_root renderer
                 echo 0 > /var/lib/signage/player/browser-failures
                 chown signage:signage /var/lib/signage/player/browser-failures
+                rm -f /var/lib/signage/player/browser-variant
                 systemctl restart signage-player.service
                 echo "Terugval gewist; player herstart." ;;
             *) echo "Gebruik: sudo signage-admin renderer [auto|browser|mpv|reset]" >&2; exit 2 ;;

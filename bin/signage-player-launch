@@ -21,8 +21,20 @@ CFG="${SIGNAGE_PLAYER_CONFIG:-/etc/signage/player.ini}"
 STATE_DIR="${SIGNAGE_PLAYER_STATE_DIR:-/var/lib/signage/player}"
 FAILS_FILE="$STATE_DIR/browser-failures"
 LAST_FAIL="$STATE_DIR/browser-last-failure.log"
+VARIANT_FILE="$STATE_DIR/browser-variant"
 OUT="${XDG_RUNTIME_DIR:-/tmp}/browser-output.txt"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+# Eerste N regels direct (regel voor regel) naar een bestand schrijven, de rest negeren.
+# Niet met awk/head: die bufferen, en zolang de player-daemon na een crash van cage nog
+# draait blijft de pijp open en zou er niets in het bestand komen.
+keep_lines() {
+    local n=0 line
+    exec 3>>"$2"
+    while IFS= read -r line; do
+        if [ "$n" -lt "$1" ]; then printf '%s\n' "$line" >&3; n=$((n + 1)); fi
+    done
+}
 
 diagnose() {
     echo "Signage:   $(cat /opt/signage/current/VERSION 2>/dev/null || echo '?')"
@@ -67,12 +79,27 @@ case "$renderer" in
 esac
 
 if [ "$mode" = browser ]; then
+    # Varianten voor de compositor, van normaal naar het veiligst. Stopt de browserweergave te
+    # snel, dan probeert de volgende start de volgende variant; een variant die werkt wordt
+    # onthouden. Bekende problemen op de Pi (vc4): hardwarecursor en atomic modesetting.
+    #   0  normaal
+    #   1  geen hardwarecursor, klassieke modesetting (WLR_DRM_NO_ATOMIC)
+    #   2  als 1, plus tekenen zonder GPU in de compositor (WLR_RENDERER=pixman)
+    variant="$(cat "$VARIANT_FILE" 2>/dev/null || echo 0)"
+    [[ "$variant" =~ ^[0-2]$ ]] || variant=0
+    vars=()
+    [ "$variant" -ge 1 ] && vars+=(WLR_NO_HARDWARE_CURSORS=1 WLR_DRM_NO_ATOMIC=1)
+    [ "$variant" -ge 2 ] && vars+=(WLR_RENDERER=pixman)
+    opts=(-s)   # -s: wisselen naar een andere console (Ctrl+Alt+F2) blijft mogelijk
+    # Na een mislukte start uitgebreid loggen (als deze cage-versie dat kan).
+    if [ "$fails" -gt 0 ] && cage -h 2>&1 | grep -q -- '-D'; then opts+=(-D); fi
+    echo "signage-player-launch: browserweergave starten (variant $variant${vars[*]:+: ${vars[*]}})." >&2
     start=$(date +%s)
-    # -s: wisselen naar een andere console (Ctrl+Alt+F2) blijft mogelijk voor onderhoud.
-    # Uitvoer gaat zoals altijd naar het systeemlogboek; de laatste 150 regels worden ook
-    # bewaard (alleen in het geheugen, 'tail' schrijft pas als cage stopt).
+    # Uitvoer gaat naar het systeemlogboek en (de eerste 3000 regels, direct weggeschreven)
+    # naar een bestand in het geheugen voor de foutmelding in de website.
     : > "$OUT" 2>/dev/null || OUT=/dev/null
-    cage -s -- "$PY" -m signage.player.daemon --renderer browser > >(tee >(tail -n 150 > "$OUT")) 2>&1 &
+    env "${vars[@]}" cage "${opts[@]}" -- "$PY" -m signage.player.daemon --renderer browser \
+        > >(tee -p >(keep_lines 3000 "$OUT")) 2>&1 &
     child=$!
     trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 0' TERM INT
     wait "$child"
@@ -80,21 +107,30 @@ if [ "$mode" = browser ]; then
     ran=$(( $(date +%s) - start ))
     if [ "$ran" -lt 30 ]; then
         echo $(( fails + 1 )) > "$FAILS_FILE"
-        echo "signage-player-launch: browserweergave stopte na ${ran}s met exitcode $rc (poging $(( fails + 1 )) van 3)." >&2
-        for _ in 1 2 3 4 5 6; do [ -s "$OUT" ] && break; sleep 0.5; done
+        [ "$variant" -lt 2 ] && echo $(( variant + 1 )) > "$VARIANT_FILE"
+        why=""
+        [ "$rc" -gt 128 ] && why=" (signaal $(( rc - 128 ))$( [ "$rc" = 134 ] && echo ': afgebroken (abort)')$( [ "$rc" = 139 ] && echo ': geheugenfout (segfault)'))"
+        echo "signage-player-launch: browserweergave stopte na ${ran}s met exitcode $rc$why (poging $(( fails + 1 )) van 3, variant $variant)." >&2
+        sleep 1
         {
-            echo "Browserweergave stopte na ${ran} s met exitcode $rc (poging $(( fails + 1 )) van 3) — $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "Browserweergave stopte na ${ran} s met exitcode $rc$why (poging $(( fails + 1 )) van 3, variant $variant) — $(date '+%Y-%m-%d %H:%M:%S')"
+            [ ${#vars[@]} -gt 0 ] && echo "Omgeving: ${vars[*]}"
             echo
             diagnose
             echo
-            echo "--- Laatste uitvoer van cage, Chromium en de player ---"
+            echo "--- Uitvoer van cage, Chromium en de player ---"
             cat "$OUT" 2>/dev/null
+            if [ ! -s "$OUT" ] && command -v journalctl >/dev/null 2>&1; then
+                echo "(geen uitvoer opgevangen; laatste regels uit het systeemlogboek:)"
+                journalctl -u signage-player.service -b -n 60 --no-pager -o short-monotonic 2>&1 | tail -n 60
+            fi
         } > "$LAST_FAIL.tmp" 2>&1
         chmod 0644 "$LAST_FAIL.tmp" 2>/dev/null
         mv -f "$LAST_FAIL.tmp" "$LAST_FAIL" 2>/dev/null
         sed -n '1,/^--- /p' "$LAST_FAIL" >&2 2>/dev/null
     else
         echo 0 > "$FAILS_FILE"
+        [ "$variant" -gt 0 ] && echo "signage-player-launch: variant $variant werkt; die blijft in gebruik." >&2
     fi
     exit "$rc"
 fi

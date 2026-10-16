@@ -1,5 +1,22 @@
 # Wijzigingen
 
+## 1.5.1 — browserweergave: veiligere varianten en volledige foutmelding
+
+Aanleiding: op een Pi 3B+ met Raspberry Pi OS 13 (Trixie, cage + Chromium 155) stopte de
+compositor cage na 2 s met exitcode 134 (afgebroken), en de foutmelding in de website bleef leeg.
+
+- **Foutmelding werd niet opgevangen**: na een crash van cage bleef de player-daemon nog even
+  draaien, waardoor de pijp openbleef en `tail` niets wegschreef. De uitvoer wordt nu regel voor
+  regel weggeschreven (eerste 3000 regels). Is er toch niets, dan komen de laatste regels uit het
+  systeemlogboek in de foutmelding. Exitcodes boven 128 worden uitgelegd (134 = afgebroken).
+- **Veiligere varianten**: stopt de browserweergave te snel, dan probeert de volgende start
+  achtereenvolgens zonder hardwarecursor en met klassieke modesetting
+  (`WLR_NO_HARDWARE_CURSORS=1 WLR_DRM_NO_ATOMIC=1`) en daarna ook zonder GPU in de compositor
+  (`WLR_RENDERER=pixman`) — bekende oplossingen voor problemen van wlroots met de vc4-GPU van de Pi.
+  Een variant die werkt wordt onthouden; pas als alle drie falen volgt mpv. Na een mislukte start
+  logt cage uitgebreid (`-D`, als de versie dat kent). *Browserweergave opnieuw proberen* begint weer
+  bij de normale variant.
+
 ## 1.5.0 — vloeiender video's, en het opstarten weer snel
 
 Opgelost:

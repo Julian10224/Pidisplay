@@ -625,7 +625,7 @@ journalctl -u signage-player -n 100
 | Symptoom | Oorzaak / oplossing |
 |---|---|
 | Zwart scherm | Scherm uit tijdens het opstarten, of er draait een desktop. Gebruik Lite, of installeer met `--disable-desktop`. Bekijk `journalctl -u signage-player`. |
-| "De browserweergave startte drie keer niet" | Onder *Instellingen → Weergave* staat de foutmelding van de laatste poging: de laatste regels van cage, Chromium en de player, plus sessie-, scherm- en geheugeninformatie (ook in `/var/lib/signage/player/browser-last-failure.log`). Los de oorzaak op en kies *Browserweergave opnieuw proberen* (of `sudo signage-admin renderer reset`). |
+| "De browserweergave startte drie keer niet" | De drie pogingen gebruiken steeds een veiligere variant van de compositor (normaal; zonder hardwarecursor en met klassieke modesetting; daarnaast zonder GPU in de compositor). Onder *Instellingen → Weergave* staat de foutmelding van de laatste poging: de laatste regels van cage, Chromium en de player, plus sessie-, scherm- en geheugeninformatie (ook in `/var/lib/signage/player/browser-last-failure.log`). Los de oorzaak op en kies *Browserweergave opnieuw proberen* (of `sudo signage-admin renderer reset`). |
 | HTML-items worden overgeslagen | De mpv-weergave is actief (zie hierboven), of de pagina ontbreekt. |
 | Scherm wordt niet herkend als het later aangaat | Voeg aan het einde van de regel in `bootfs/cmdline.txt` toe: ` video=HDMI-A-1:1920x1080@60D` en herstart. |
 | Video hapert | Controleer het formaat (§5) en het dashboard (overgeslagen frames). Probeer 720p, of `sudo signage-admin renderer mpv`. |

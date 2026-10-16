@@ -112,3 +112,31 @@ def test_launcher_saves_failure_output(tmp_path):
     text = (state / "browser-last-failure.log").read_text()
     assert "poging 3 van 3" in text and "Could not activate session" in text and "Chromium 130.0" in text
     assert "Sessie:" in text and "DRM:" in text
+
+
+def test_launcher_variants_and_capture_with_lingering_child(tmp_path):
+    """cage breekt af (exitcode 134) terwijl de player-daemon nog even doorleeft: de uitvoer
+    moet toch bewaard worden, en elke volgende start probeert een veiligere variant."""
+    import subprocess
+    here = os.path.dirname(os.path.abspath(__file__))
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "cage").write_text("#!/bin/bash\n( sleep 3 ) &\n"
+                               "echo \"env: ${WLR_NO_HARDWARE_CURSORS:-x} ${WLR_DRM_NO_ATOMIC:-x} ${WLR_RENDERER:-x}\" >&2\n"
+                               "echo 'wlr_output_init: Assertion failed.' >&2\nkill -ABRT $$\n")
+    (fake / "chromium").write_text("#!/bin/bash\necho 'Chromium 155.0'\n")
+    for f in fake.iterdir():
+        f.chmod(0o755)
+    (tmp_path / "p.ini").write_text("[player]\nrenderer = browser\n")
+    state = tmp_path / "state"
+    env = dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}", SIGNAGE_PLAYER_CONFIG=str(tmp_path / "p.ini"),
+               SIGNAGE_PLAYER_STATE_DIR=str(state), XDG_RUNTIME_DIR=str(tmp_path))
+    launcher = os.path.join(here, "..", "bin", "signage-player-launch")
+    expected = ["x x x", "1 1 x", "1 1 pixman"]
+    for attempt, want in enumerate(expected, 1):
+        res = subprocess.run(["bash", launcher], env=env, capture_output=True, text=True, timeout=60)
+        assert res.returncode == 134
+        text = (state / "browser-last-failure.log").read_text()
+        assert f"env: {want}" in text and "Assertion failed" in text, text
+        assert "signaal 6" in text and f"poging {attempt} van 3" in text
+    assert (state / "browser-variant").read_text().strip() == "2"
