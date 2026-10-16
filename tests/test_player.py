@@ -354,3 +354,60 @@ def test_mpv_fill_mode_sets_keepaspect(tmp_path, fake_log):
         assert wait_for(lambda: "set keepaspect=False" in read_log(fake_log), timeout=10)
     finally:
         pt.stop()
+
+
+# -- 1.2: willekeurige volgorde en logo in de mpv-weergave ----------------------------------
+
+def _rounds(seq, names):
+    n = len(names)
+    return [seq[i:i + n] for i in range(0, len(seq) - n + 1, n)]
+
+
+def test_mpv_shuffle_rounds(tmp_path, fake_log):
+    _ini, player_ini = make_config(tmp_path, port=free_port())
+    names = [f"f{i}.png" for i in range(5)]
+    items = [{"media_id": str(i), "name": n, "kind": "image", "local": img(tmp_path, n), "duration": 0.25}
+             for i, n in enumerate(names)]
+    write_cache(str(tmp_path / "player-cache"), items,
+                playlist={"id": 1, "name": "T", "repeat_mode": "loop", "mute": False, "shuffle": True})
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: len(loads(fake_log)) >= 20, timeout=40)
+        seq = loads(fake_log)[:20]
+        rounds = _rounds(seq, names)
+        assert all(sorted(r) == sorted(names) for r in rounds), rounds      # elk item één keer per ronde
+        assert any(r != names for r in rounds), "nooit geschud"
+        for a, b in zip(rounds, rounds[1:]):
+            assert a[-1] != b[0], "zelfde item twee keer achter elkaar"
+    finally:
+        pt.stop()
+
+
+def test_mpv_logo_overlay_per_item(tmp_path, fake_log):
+    _ini, player_ini = make_config(tmp_path, port=free_port())
+    from PIL import Image as _I
+    logo = tmp_path / "logo.png"
+    _I.new("RGBA", (400, 100), (255, 0, 0, 128)).save(logo)
+    a, b = img(tmp_path, "a.png"), img(tmp_path, "b.png")
+    t = tmp_path / "overgang.mp4"
+    t.write_bytes(b"x")
+    write_cache(str(tmp_path / "player-cache"), [
+        {"media_id": "1", "name": "a", "kind": "image", "local": a, "duration": 0.5, "transition": "T",
+         "logo": {"media_id": "L", "local": str(logo)}},
+        {"media_id": "2", "name": "b", "kind": "image", "local": b, "duration": 0.5, "transition": "T"},
+    ], transitions={"T": {"media_id": "T", "name": "overgang", "local": str(t), "video_duration": 0.5}})
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: loads(fake_log).count("a.png") >= 2, timeout=25)
+        log = read_log(fake_log)
+        ev = [l for l in log if not l.startswith("set ") or l.startswith("set overlay")]
+        i = ev.index("a.png")
+        assert ev[i + 1].startswith("set overlay-add logo-"), ev[i:i + 3]
+        # 1920x1080 (geen schermmaat bekend): logo maximaal 18% => 345x86, marge 32 px
+        assert ev[i + 1].endswith(" 32,32 345x86"), ev[i + 1]
+        j = ev.index("overgang.mp4", i)
+        assert ev[j + 1] == "set overlay-remove", "logo blijft staan tijdens de overgang"
+        k = ev.index("b.png", j)
+        assert not any(x.startswith("set overlay-add") for x in ev[j:k + 1]), "item b heeft geen logo"
+    finally:
+        pt.stop()

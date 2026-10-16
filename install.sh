@@ -141,7 +141,7 @@ fi
 # -----------------------------------------------------------------------------
 PKGS=(python3 sudo iproute2)
 if has_server; then PKGS+=(python3-flask python3-waitress python3-pil ffmpeg fonts-dejavu-core avahi-daemon); fi
-if has_player; then PKGS+=(mpv fonts-dejavu-core); fi
+if has_player; then PKGS+=(mpv fonts-dejavu-core python3-pil); fi
 
 # Browserweergave (HTML-content, overgangen met voorgeladen lagen): cage + Chromium.
 BROWSER_PKGS=()

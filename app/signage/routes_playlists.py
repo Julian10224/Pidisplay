@@ -48,7 +48,8 @@ def get_playlist_row(conn, pid):
 def playlist_items(conn, pid):
     return conn.execute(
         "SELECT pi.id AS item_id, pi.position, pi.duration AS item_duration, pi.scale_mode AS item_scale_mode, "
-        "pi.transition_mode AS item_transition_mode, pi.transition_media_id AS item_transition_media_id, m.* "
+        "pi.transition_mode AS item_transition_mode, pi.transition_media_id AS item_transition_media_id, "
+        "pi.logo_media_id AS item_logo_media_id, m.* "
         "FROM playlist_items pi JOIN media m ON m.id = pi.media_id "
         "WHERE pi.playlist_id = ? ORDER BY pi.position", (pid,)).fetchall()
 
@@ -78,8 +79,13 @@ def playlist_problems(conn, cfg, pid):
 
 
 def playlist_warnings(conn, cfg, pl_row):
-    """Niet-blokkerende meldingen (een ontbrekende overgang wordt overgeslagen)."""
+    """Niet-blokkerende meldingen (een ontbrekende overgang of logo wordt overgeslagen)."""
     warnings = []
+    for it in playlist_items(conn, pl_row["id"]):
+        if it["item_logo_media_id"]:
+            lrow = conn.execute("SELECT * FROM media WHERE id = ?", (it["item_logo_media_id"],)).fetchone()
+            if lrow is None or not media.playback_available(cfg, lrow):
+                warnings.append(f"Het logo bij '{it['name']}' ontbreekt; het item wordt zonder logo getoond.")
     if not pl_row["transition_enabled"]:
         return warnings
     ids = set()
@@ -136,6 +142,7 @@ def _summary(conn, cfg, row, default_id, assigned, settings):
         "transition_enabled": bool(row["transition_enabled"]),
         "transition_media_id": row["transition_media_id"],
         "new_item_transition": row["new_item_transition"],
+        "shuffle": bool(row["shuffle"]),
     }
 
 
@@ -184,6 +191,8 @@ def register(app):
                 "transition_mode": it["item_transition_mode"],
                 "transition_media_id": it["item_transition_media_id"],
                 "transition_media": _media_json(conn, cfg, it["item_transition_media_id"]),
+                "logo_media_id": it["item_logo_media_id"],
+                "logo_media": _media_json(conn, cfg, it["item_logo_media_id"]),
             })
         out = _summary(conn, cfg, row, default_id, assigned, settings)
         out["items"] = items
@@ -202,6 +211,16 @@ def register(app):
             raise ApiError(400, f"{what}: kies een videobestand als overgang.")
         return str(mid)
 
+    def _logo_id(conn, mid, what):
+        if mid in (None, ""):
+            return None
+        r = conn.execute("SELECT kind, format FROM media WHERE id = ?", (str(mid),)).fetchone()
+        if r is None:
+            raise ApiError(400, f"{what}: onbekend logo.")
+        if r["kind"] != "image" or r["format"] != "PNG":
+            raise ApiError(400, f"{what}: een logo moet een PNG-afbeelding zijn.")
+        return str(mid)
+
     @app.put("/api/playlists/<pid>")
     def playlists_update(pid):
         data = body()
@@ -214,6 +233,7 @@ def register(app):
         mute = 1 if data.get("mute", bool(row["mute"])) else 0
         t_enabled = 1 if data.get("transition_enabled", bool(row["transition_enabled"])) else 0
         t_media = _video_id(conn, data.get("transition_media_id", row["transition_media_id"]), "Standaardovergang")
+        shuffle = 1 if data.get("shuffle", bool(row["shuffle"])) else 0
         new_item_t = data.get("new_item_transition", row["new_item_transition"])
         if new_item_t not in ("default", "none"):
             raise ApiError(400, "Ongeldige standaardinstelling voor nieuwe items.")
@@ -249,7 +269,8 @@ def register(app):
                     tmid = _video_id(conn, it.get("transition_media_id"), f"Item {i + 1}")
                     if tmid is None:
                         raise ApiError(400, f"Item {i + 1}: kies een overgangsvideo of 'standaard'.")
-                clean_items.append((it["media_id"], dur, scale, tmode, tmid))
+                logo = _logo_id(conn, it.get("logo_media_id"), f"Item {i + 1}")
+                clean_items.append((it["media_id"], dur, scale, tmode, tmid, logo))
             if not clean_items:
                 _default_id, assigned = _assignment_info(conn)
                 if row["id"] in assigned:
@@ -259,15 +280,15 @@ def register(app):
             with db.Tx(conn):
                 conn.execute(
                     "UPDATE playlists SET name = ?, repeat_mode = ?, mute = ?, updated_at = ?, "
-                    "transition_enabled = ?, transition_media_id = ?, new_item_transition = ? WHERE id = ?",
-                    (name, repeat_mode, mute, db.now(), t_enabled, t_media, new_item_t, row["id"]))
+                    "transition_enabled = ?, transition_media_id = ?, new_item_transition = ?, shuffle = ? WHERE id = ?",
+                    (name, repeat_mode, mute, db.now(), t_enabled, t_media, new_item_t, shuffle, row["id"]))
                 if clean_items is not None:
                     conn.execute("DELETE FROM playlist_items WHERE playlist_id = ?", (row["id"],))
                     conn.executemany(
                         "INSERT INTO playlist_items (playlist_id, media_id, position, duration, scale_mode, "
-                        "transition_mode, transition_media_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        [(row["id"], mid, pos, dur, sc, tm, tmid)
-                         for pos, (mid, dur, sc, tm, tmid) in enumerate(clean_items)])
+                        "transition_mode, transition_media_id, logo_media_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        [(row["id"], mid, pos, dur, sc, tm, tmid, logo)
+                         for pos, (mid, dur, sc, tm, tmid, logo) in enumerate(clean_items)])
         except sqlite3.IntegrityError:
             raise ApiError(409, "Er bestaat al een playlist met deze naam.")
         log.info("Playlist '%s' opgeslagen.", name)

@@ -14,11 +14,17 @@ Toestandsmachine (zie STATES):
 
 Een overgang wordt alleen gestart vanuit PLAYING (nooit na een overgang), zodat hij nooit
 twee keer achter elkaar of uit zichzelf speelt.
+
+Willekeurige volgorde: bij elke nieuwe ronde wordt de lijst geschud (elk item één keer, het
+eerste item nooit gelijk aan het vorige). Logo's worden als mpv-overlay linksboven getoond
+(mpv 'overlay-add'); tijdens een overgang en op het standby-scherm is er geen logo.
 """
 
+import hashlib
 import logging
 import os
 import queue
+import random
 import signal
 import threading
 import time
@@ -83,6 +89,8 @@ class MpvRenderer:
         self.running = True
         self.applied = {}
         self.mpv_started_once = False
+        self.overlay = None          # huidige logo-overlay (of None)
+        self.screen_size = None
         self.history = []            # (tijd, toestand, naam) voor tests en diagnose
         self.syncer = Syncer(pcfg, self.cache_dir, self.queue, self.status)
 
@@ -161,7 +169,7 @@ class MpvRenderer:
                      (cfg.get("playlist") or {}).get("name") or "-", len(cfg.get("items") or []))
             self.cfg = cfg
             self.pending = None
-            self.items = list(cfg.get("items") or [])
+            self.items = self._round(cfg.get("items") or [], self._shuffle(cfg, False))
             self.fallback_active = False
             self.index = -1
             self.consecutive_failures = 0
@@ -229,6 +237,8 @@ class MpvRenderer:
         self.mpv_started_once = True
         self.message = None
         self.applied = {}
+        self.overlay = None
+        self.screen_size = None
         self.apply_properties()
         if self.state == "STANDBY":
             self.show_standby(self.standby_reason or "")
@@ -241,13 +251,88 @@ class MpvRenderer:
         self.error(f"mpv wordt herstart: {reason}")
         self.mpv.stop()
 
+    # -- logo-overlay ---------------------------------------------------------------
+    LOGO_MAX = 0.18      # maximaal 18% van breedte en hoogte (zelfde als browserweergave)
+    LOGO_MARGIN = 0.03   # 3% van de kortste schermzijde
+
+    def _screen(self):
+        if not self.screen_size:
+            try:
+                w, h = int(self.mpv.get("osd-width", 0) or 0), int(self.mpv.get("osd-height", 0) or 0)
+            except (MpvError, TypeError, ValueError):
+                w = h = 0
+            if w > 0 and h > 0:
+                self.screen_size = (w, h)
+        return self.screen_size or (1920, 1080)
+
+    def _logo_overlay(self, path):
+        """Zet een PNG om naar een BGRA-bestand (voorvermenigvuldigde alfa) voor overlay-add."""
+        from PIL import Image, ImageChops
+        sw, sh = self._screen()
+        rot = int(((self.cfg or {}).get("player") or {}).get("rotation", 0)) % 360
+        cw, ch = (sh, sw) if rot in (90, 270) else (sw, sh)
+        st = os.stat(path)
+        key = hashlib.sha256(f"{path}|{st.st_size}|{st.st_mtime}|{sw}x{sh}|{rot}".encode()).hexdigest()[:24]
+        raw = os.path.join(self.cache_dir, f"logo-{key}.bgra")
+        meta = raw + ".txt"
+        if not (os.path.exists(raw) and os.path.exists(meta)):
+            with Image.open(path) as im:
+                im = im.convert("RGBA")
+                im.thumbnail((max(1, int(cw * self.LOGO_MAX)), max(1, int(ch * self.LOGO_MAX))))
+                if rot:
+                    im = im.rotate(-rot, expand=True)   # mee draaien met de schermstand
+                r, g, b, a = im.split()
+                r, g, b = (ImageChops.multiply(c, a) for c in (r, g, b))
+                data = Image.merge("RGBA", (b, g, r, a)).tobytes()
+                w, h = im.size
+            with open(raw + ".tmp", "wb") as fh:
+                fh.write(data)
+            os.replace(raw + ".tmp", raw)
+            with open(meta, "w") as fh:
+                fh.write(f"{w} {h}")
+            olds = sorted((f for f in os.listdir(self.cache_dir) if f.startswith("logo-") and f.endswith(".bgra")),
+                          key=lambda f: os.path.getmtime(os.path.join(self.cache_dir, f)))
+            for f in olds[:-20]:
+                for x in (f, f + ".txt"):
+                    try:
+                        os.unlink(os.path.join(self.cache_dir, x))
+                    except OSError:
+                        pass
+        with open(meta) as fh:
+            w, h = (int(v) for v in fh.read().split())
+        m = round(self.LOGO_MARGIN * min(sw, sh))
+        # Linksboven van de inhoud; bij een gedraaid scherm de bijbehorende hoek.
+        x, y = {0: (m, m), 90: (sw - w - m, m), 180: (sw - w - m, sh - h - m), 270: (m, sh - h - m)}.get(rot, (m, m))
+        return (raw, max(0, x), max(0, y), w, h)
+
+    def set_logo(self, logo):
+        want = None
+        if logo and logo.get("local") and os.path.isfile(logo["local"]):
+            try:
+                want = self._logo_overlay(logo["local"])
+            except Exception as exc:  # noqa: BLE001
+                self.error(f"Logo kan niet worden getoond: {exc}", once_key=("logo", logo.get("media_id")))
+        if want == self.overlay:
+            return
+        try:
+            if want is None:
+                self.mpv.command("overlay-remove", 0)
+            else:
+                raw, x, y, w, h = want
+                self.mpv.command("overlay-add", 0, x, y, raw, 0, "bgra", w, h, w * 4)
+            self.overlay = want
+        except MpvError as exc:
+            self.error(f"Logo-overlay mislukt: {exc}", once_key="overlay")
+            self.overlay = None
+
     # -- afspelen ------------------------------------------------------------------
-    def _load(self, path, scale):
+    def _load(self, path, scale, logo=None):
         self.apply_scale(scale)
         self.mpv.command("loadfile", path, "replace")
         # Met --keep-open pauzeert mpv aan het einde van een video, en die pauze
         # blijft gelden voor het volgende bestand. Daarom altijd expliciet hervatten.
         self.mpv.set("pause", False)
+        self.set_logo(logo)
         self.loaded_at = time.time()
 
     def show_standby(self, reason):
@@ -279,7 +364,7 @@ class MpvRenderer:
             self.fail(f"Bestand ontbreekt: {item.get('name')}")
             return
         try:
-            self._load(path, item.get("scale") or (self.cfg or {}).get("scale_default", "cover"))
+            self._load(path, item.get("scale") or (self.cfg or {}).get("scale_default", "cover"), item.get("logo"))
         except MpvError as exc:
             self.restart_mpv(str(exc))
             return
@@ -304,10 +389,13 @@ class MpvRenderer:
             new = self.pending
             self.pending = None
             cur_id = (self.current or {}).get("media_id")
-            new_items = list(new.get("items") or [])
             nxt = 0
-            if 0 <= self.index < len(new_items) and new_items[self.index].get("media_id") == cur_id:
-                nxt = self.index + 1
+            if self._shuffle(new, False):
+                new_items = self._round(new.get("items") or [], True)   # bewerkt + willekeurig: nieuwe ronde
+            else:
+                new_items = list(new.get("items") or [])
+                if 0 <= self.index < len(new_items) and new_items[self.index].get("media_id") == cur_id:
+                    nxt = self.index + 1
             self.cfg = new
             self.items = new_items
             self.fallback_active = False
@@ -327,10 +415,29 @@ class MpvRenderer:
             return "hold"
         if mode == "once_then_default" and not self.fallback_active and (self.cfg or {}).get("fallback_items"):
             log.info("Playlist eenmaal afgespeeld; overschakelen naar standaardplaylist.")
-            self.items = list(self.cfg["fallback_items"])
+            self.items = self._round(self.cfg["fallback_items"], self._shuffle(self.cfg, True))
             self.fallback_active = True
             self.consecutive_failures = 0
+            return 0
+        if self._shuffle(self.cfg, self.fallback_active):
+            base = (self.cfg or {}).get("fallback_items" if self.fallback_active else "items") or self.items
+            self.items = self._round(base, True)
         return 0
+
+    @staticmethod
+    def _shuffle(cfg, fallback):
+        pl = (cfg or {}).get("playlist") or {}
+        return bool(pl.get("fallback_shuffle") if fallback else pl.get("shuffle"))
+
+    def _round(self, base, shuffle):
+        items = list(base)
+        if shuffle and len(items) > 1:
+            random.shuffle(items)
+            last = (self.current or {}).get("media_id")
+            if last is not None and items[0].get("media_id") == last:
+                k = random.randrange(1, len(items))
+                items[0], items[k] = items[k], items[0]
+        return items
 
     def go_next(self):
         if self.pending is None and not self.items:

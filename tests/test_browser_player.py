@@ -40,7 +40,7 @@ def free_port():
 
 @pytest.fixture(scope="module")
 def media():
-    if not os.path.exists(os.path.join(MEDIA, "short.webm")):
+    if not os.path.exists(os.path.join(MEDIA, "logo.png")):
         subprocess.run([sys.executable, os.path.join(HERE, "browser", "make_media.py"), MEDIA], check=True)
     return MEDIA
 
@@ -66,9 +66,10 @@ class Rig:
         self.page = None
 
     # -- scenario -------------------------------------------------------------
-    def item(self, kind, name, scale="cover", duration=1, transition=None, design=None):
+    def item(self, kind, name, scale="cover", duration=1, transition=None, design=None, logo=False):
         it = {"media_id": name.replace("/", "_").replace(".", "_"), "name": name, "kind": kind, "scale": scale,
-              "duration": None if kind == "video" else duration, "transition": transition}
+              "duration": None if kind == "video" else duration, "transition": transition,
+              "logo": {"media_id": "logo", "local": os.path.join(self.media, "logo.png")} if logo else None}
         if kind == "html":
             path = os.path.join(self.media, "html", name)
             it["html"] = {"source": "upload", "local": path, "entry": "index.html",
@@ -78,10 +79,11 @@ class Rig:
             it["video_duration"] = {"portrait.webm": 2, "landscape.webm": 1.5, "short.webm": 0.2}.get(name)
         return it
 
-    def write(self, items, playlist_id=1, repeat="loop", transitions=None, rotation=0, scale_default="cover"):
+    def write(self, items, playlist_id=1, repeat="loop", transitions=None, rotation=0, scale_default="cover",
+              shuffle=False):
         self.rev += 1
         cfg = {"revision": f"r{self.rev}", "playlist": {"id": playlist_id, "name": f"P{playlist_id}",
-                                                       "repeat_mode": repeat, "mute": True},
+                                                       "repeat_mode": repeat, "mute": True, "shuffle": shuffle},
                "items": items, "fallback_items": [], "transitions": transitions or {},
                "scale_default": scale_default, "volume": 0, "player": {"rotation": rotation},
                "standby": {"local": os.path.join(self.media, "standby.png")}, "system_name": "Test"}
@@ -304,7 +306,7 @@ def test_html_with_external_resources_offline(rig):
 
 def test_edit_during_transition_applies_after_it(rig):
     items = [rig.item("image", "portrait.png", duration=1, transition="T"),
-             rig.item("image", "small.png", duration=1, transition="T")]
+             rig.item("image", "portrait.png", duration=1, transition="T")]
     rig.write(items, transitions=rig.transition())
     rig.start()
     end = time.time() + 15
@@ -372,3 +374,83 @@ def test_html_is_not_preloaded_too_early(rig):
     assert rig.js("document.querySelectorAll('#stage iframe').length") == 0, "HTML al geladen terwijl er nog 6 s te gaan was"
     rig.wait_playing("page", timeout=15)
     assert rig.probe()["blank"] == 0
+
+
+# -- 1.2: willekeurige volgorde en logo ------------------------------------------------------
+
+def test_shuffle_rounds(rig):
+    names = ["portrait.png", "small.png", "landscape.jpg", "standby.png", "logo.png"]
+    rig.write([rig.item("image", n, duration=0.4) for n in names], shuffle=True)
+    rig.start()
+    rig.wait_playing(names[0], timeout=60, count=4)
+    seq = _names(rig)
+    rounds = [seq[i:i + 5] for i in range(0, len(seq) - 4, 5)][:3]
+    assert len(rounds) == 3
+    assert all(sorted(r) == sorted(names) for r in rounds), rounds
+    assert any(r != names for r in rounds), "nooit geschud"
+    for a, b in zip(rounds, rounds[1:]):
+        assert a[-1] != b[0]
+    assert rig.probe()["blank"] == 0
+
+
+def test_shuffle_off_keeps_order(rig):
+    names = ["portrait.png", "small.png", "landscape.jpg"]
+    rig.write([rig.item("image", n, duration=0.4) for n in names], shuffle=False)
+    rig.start()
+    rig.wait_playing(names[0], timeout=30, count=3)
+    assert _names(rig)[:6] == names * 2
+
+
+YELLOW = (255, 255, 0)
+
+
+def test_logo_top_left_per_item(rig):
+    items = [rig.item("image", "portrait.png", duration=30, logo=True)]
+    rig.write(items)
+    rig.start()
+    rig.wait_playing("portrait.png")
+    img = rig.shot()
+    m = round(0.03 * min(W, H))
+    assert near(img.getpixel((m + 10, m + 10)), YELLOW, 30), img.getpixel((m + 10, m + 10))
+    # onderste helft van het logo is transparant: daar is het item (rood) zichtbaar
+    lw = min(400 * 0.18 * H / 200, W * 0.18)       # max 18% breed/hoog, proportioneel
+    assert near(img.getpixel((m + 10, m + int(lw / 2 * 0.75))), RED), "transparantie"
+    assert near(img.getpixel((m + int(lw) + 15, m + 5)), RED), "logo groter dan 18%"
+    # zonder logo
+    rig.write([rig.item("image", "portrait.png", duration=30)], playlist_id=2)
+    rig.wait_playing("portrait.png", count=2)
+    img = rig.shot()
+    assert near(img.getpixel((m + 10, m + 10)), RED)
+
+
+def test_logo_on_video_and_html_not_on_transition(rig):
+    items = [rig.item("video", "landscape.webm", logo=True, transition="T"),
+             rig.item("html", "page", duration=1.5, logo=True, transition="T"),
+             rig.item("image", "portrait.png", duration=1, transition="T")]
+    rig.write(items, transitions=rig.transition())
+    rig.start()
+    m = round(0.03 * min(W, H))
+    seen = {}
+    end = time.time() + 30
+    while time.time() < end and len(seen) < 4:
+        st = rig.js("window.__signage.state()")
+        cur = rig.js("(window.__signage.snapshot().current||{}).name")
+        key = "T" if st == "PLAYING_TRANSITION" else (cur if st == "PLAYING" else None)
+        if key and key not in seen:
+            time.sleep(0.3)
+            if rig.js("window.__signage.state()") == st:
+                seen[key] = rig.shot(0).getpixel((m + 10, m + 10))
+        time.sleep(0.05)
+    assert near(seen["landscape.webm"], YELLOW, 40), seen
+    assert near(seen["page"], YELLOW, 40), seen
+    assert not near(seen["T"], YELLOW, 60), seen
+    assert near(seen["portrait.png"], RED), seen       # item zonder logo
+    assert rig.probe()["blank"] == 0
+
+
+def test_missing_logo_does_not_block_item(rig):
+    it = rig.item("image", "small.png", duration=1)
+    it["logo"] = {"media_id": "x", "local": os.path.join(rig.media, "bestaat-niet.png")}
+    rig.write([it, rig.item("image", "portrait.png", duration=1)])
+    rig.start()
+    rig.wait_playing("small.png", timeout=15, count=2)

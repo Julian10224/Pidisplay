@@ -1,5 +1,35 @@
 # Wijzigingen
 
+## 1.2.0 — willekeurige volgorde, logo per item en media-overzicht
+
+Nieuw:
+
+- **Willekeurige volgorde** per playlist (schakelaar in de playlist-editor). Elke ronde
+  opnieuw geschud, elk item één keer per ronde, nooit hetzelfde item twee keer achter elkaar.
+  Werkt in de browser- en de mpv-weergave, ook met overgangen, logo's en herhaalinstellingen.
+- **Logo per item**: een PNG linksboven (max. 18% van breedte/hoogte, marge 3%), per item te
+  kiezen of in één keer voor alle items. Het logo hoort bij het item (niet bij de overgang),
+  draait mee met de schermstand en werkt in beide weergaven (in mpv als overlay).
+- **Media als volledig overzicht ('assets')**: opslaggebruik (media, vrije ruimte, back-ups),
+  ruimte per bestand, waar elk bestand gebruikt wordt (playlist, overgang, logo, niet gebruikt),
+  filters op PNG en 'niet gebruikt', sorteren op ruimte, en meerdere bestanden tegelijk
+  verwijderen met één bevestiging (en een tweede bij bestanden die in gebruik zijn).
+- Voorbeeld in de editor toont logo's en willekeurige volgorde; het dashboard markeert het
+  huidige item ook bij willekeurige volgorde goed.
+
+Databasemigratie 2 → 3 (automatisch, met back-up vooraf): `playlists.shuffle` (standaard uit)
+en `playlist_items.logo_media_id` (standaard leeg). Bestaande playlists veranderen niet.
+
+API: `PUT /api/playlists/<id>` accepteert `shuffle` en per item `logo_media_id` (alleen PNG);
+`GET /api/media` geeft `summary`, `storage_bytes` en `transparent`; nieuw
+`POST /api/media/delete` voor meerdere bestanden. De installer installeert `python3-pil` nu
+ook voor een losse player (nodig voor het logo in de mpv-weergave).
+
+Tests: 87 automatische tests geslaagd (nieuw: `test_v12.py`, shuffle en logo in beide
+weergaven), logo met de echte mpv op een virtueel scherm (`tests/mpv_logo_check.py`, ook bij
+90° gedraaid), beheerwebsite 11 nieuwe stappen, upgrade 1.1.1 → 1.2.0 van een geïnstalleerd
+systeem met gegevens en `tests/check_installed_v12.py` 10/10.
+
 ## 1.1.1 — controle van de volledige code tegen beide opdrachten
 
 Gevonden en opgelost:

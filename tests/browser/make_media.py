@@ -26,6 +26,9 @@ banded(1080, 1920, os.path.join(OUT, "portrait.png"))
 Image.new("RGB", (1920, 1080), (40, 200, 120)).save(os.path.join(OUT, "landscape.jpg"), quality=90)
 Image.new("RGB", (320, 180), (240, 220, 30)).save(os.path.join(OUT, "small.png"))
 Image.new("RGB", (1920, 1080), (17, 24, 39)).save(os.path.join(OUT, "standby.png"))
+logo = Image.new("RGBA", (400, 200), (255, 255, 0, 255))   # geel; onderste helft transparant
+logo.paste((255, 255, 0, 0), (0, 100, 400, 200))
+logo.save(os.path.join(OUT, "logo.png"))
 
 
 def video(path, color, size, seconds, bands=False):

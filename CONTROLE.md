@@ -1,6 +1,6 @@
 # Controle van de code tegen beide opdrachten
 
-Versie 1.1.1. Per eis: waar het in de code zit en hoe het is gecontroleerd.
+Versie 1.2.0. Per eis: waar het in de code zit en hoe het is gecontroleerd.
 
 **Legenda**
 
@@ -133,6 +133,16 @@ staat als 🟡 en is opgenomen in de checklist in README §17.
 | 13 | Mix van foto's, video's en HTML | ✅ |
 | 14 | Configuratie blijft na reboot | 🟡 |
 | 15 | Stabiel bij langdurig afspelen | ✅ mpv · 🟡 Chromium op de Pi (lek bij overgangen gevonden en opgelost in 1.1.1) |
+
+---
+
+## Aanvullende wensen (1.2.0)
+
+| Wens | Status | Waar / hoe gecontroleerd |
+|---|---|---|
+| Schakelaar voor willekeurige volgorde per playlist | ✅ | editor + `playlists.shuffle`; browser- en mpv-tests: elk item één keer per ronde, geschud, nooit twee keer achter elkaar; geïnstalleerd systeem 10/10 |
+| Per item een PNG-logo linksboven | ✅ / 🟡 | `playlist_items.logo_media_id`; pixelmetingen in Chromium (positie, 18%, transparantie, niet tijdens overgang) en met de echte mpv (ook 90° gedraaid); niet op het fysieke scherm bekeken |
+| Pagina met alles wat op de Pi geüpload is, met verwijderen | ✅ | *Media* uitgebreid tot overzicht (opslag, gebruik, filters, meerdere tegelijk verwijderen); API- en browsertests |
 
 ---
 

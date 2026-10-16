@@ -123,20 +123,27 @@ het percentage overgeslagen videoframes of de gebruikte decoder, vrije opslag, u
 temperatuur, meldingen en de belangrijkste instellingen. Je kunt hier direct een andere
 playlist kiezen.
 
-**Media** — sleep bestanden in het venster of kies ze; meerdere tegelijk, met voortgang.
-Elk bestand wordt gecontroleerd (echt een afbeelding/video/HTML? codec? resolutie?). Zoeken,
-filteren (foto, video, HTML), sorteren, voorvertonen, wijzigen, origineel downloaden en
-verwijderen. Met *Lokale pagina toevoegen* kies je een ingebouwde schermpagina (klok,
-welkom). Een bestand dat in een playlist of als overgang wordt gebruikt kan alleen na een
-extra waarschuwing worden verwijderd.
+**Media** — het overzicht van alles wat op de Pi staat (de 'assets'): foto's, video's,
+HTML-pagina's en logo's. Bovenaan staat hoeveel ruimte de media innemen, hoeveel er vrij is,
+hoeveel bestanden nergens worden gebruikt en hoeveel ruimte de back-ups innemen. Uploaden:
+sleep bestanden in het venster of kies ze; meerdere tegelijk, met voortgang. Elk bestand wordt
+gecontroleerd (echt een afbeelding/video/HTML? codec? resolutie?). Per bestand zie je de
+ruimte op de Pi en waar het gebruikt wordt (*In 2 playlists*, *Overgang*, *Logo* of *Niet
+gebruikt*). Zoeken, filteren (foto, video, HTML, PNG voor logo's, niet gebruikt, met
+waarschuwing), sorteren (ook op ruimte), voorvertonen, wijzigen, origineel downloaden en
+verwijderen: los, of **meerdere tegelijk** met de vinkjes en *Selectie verwijderen*. Een
+bestand dat in gebruik is kan alleen na een extra waarschuwing worden verwijderd; het wordt
+dan uit de playlists gehaald (als overgang of logo: uitgezet). Met *Lokale pagina toevoegen*
+kies je een ingebouwde schermpagina (klok, welkom).
 
 **Playlists** — media toevoegen, volgorde slepen (of met pijltjestoetsen op het greepje), per
 item de duur (foto's en HTML; leeg = standaardduur) en de schaalmodus, herhalen (*steeds*,
 *één keer en laatste item laten staan*, *één keer en dan de standaardplaylist*), geluid van
-video's aan/uit, en overgangen (zie §4). *Opslaan en activeren* zet de playlist binnen enkele
-seconden op het scherm, zonder herstart. Een lege playlist of een playlist met ontbrekende
-bestanden kan niet worden geactiveerd. *Voorbeeld* speelt de playlist in je browser, inclusief
-overgangen en schaalmodi.
+video's aan/uit, **willekeurige volgorde**, een **logo per item** en overgangen (zie §4).
+*Opslaan en activeren* zet de playlist binnen enkele seconden op het scherm, zonder herstart.
+Een lege playlist of een playlist met ontbrekende bestanden kan niet worden geactiveerd.
+*Voorbeeld* speelt de playlist in je browser, inclusief overgangen, logo's, willekeurige
+volgorde en schaalmodi.
 
 **Schermen** — de server, de players en het scherm per player: online-status, laatste
 contact, wat er speelt, of de HDMI-aansluiting een scherm ziet en met welke resolutie,
@@ -179,6 +186,28 @@ De standaard stel je in onder *Instellingen → Weergave*; per playlistitem kun 
 afwijken. Overgangsvideo's volgen de standaardmodus. Foto's krijgen bij het uploaden een
 afspeelversie die groot genoeg is om het scherm beeldvullend te bedekken (maximaal 2048 px per
 zijde, de grens van de Pi 3-GPU), zodat een staande foto op een liggend scherm niet wazig wordt.
+
+### Willekeurige volgorde
+
+Zet in de playlist *Willekeurige volgorde* aan. Elke ronde wordt de volgorde opnieuw geschud:
+elk item komt precies één keer langs, en het eerste item van een nieuwe ronde is nooit hetzelfde
+als het laatste van de vorige. Duur, schaalmodus, overgang en logo blijven bij hun item horen
+(een overgang speelt dus na het item waar hij bij hoort, ongeacht wat er daarna komt). De
+herhaalinstellingen werken ook met willekeurige volgorde: *één keer en laatste laten staan*
+speelt één geschudde ronde. Bewerk je de playlist terwijl hij speelt, dan begint na het huidige
+item een nieuwe geschudde ronde met de nieuwe inhoud.
+
+### Logo per item
+
+Bij elk item staat *+ Logo*: kies een PNG uit Media (bij voorkeur met transparante achtergrond).
+Met *Logo voor alle items* zet je hetzelfde logo in één keer bij alle items; met *Alle logo's
+weghalen* haal je ze weg. Het logo komt **linksboven**, met een marge van 3% van de kortste
+schermzijde, en is maximaal 18% van de breedte en hoogte van het scherm (verhouding blijft
+behouden, een klein logo wordt niet vergroot). Bij een gedraaid scherm draait het logo mee en
+staat het linksboven van de inhoud. Het logo hoort bij het item: het verschijnt en verdwijnt
+tegelijk met het item, dus niet tijdens een overgang of op het standby-scherm. Werkt in beide
+weergaven (browser en mpv), ook over foto's, video's en HTML-pagina's. Ontbreekt het logobestand,
+dan wordt het item zonder logo getoond (met een melding).
 
 ### HTML-pagina's
 
@@ -513,17 +542,20 @@ journalctl -u signage-player -n 100
 Er was geen toegang tot een Raspberry Pi of het aangesloten scherm. Getest is in een
 Linux-testomgeving (x86_64, Python 3.13 zoals Raspberry Pi OS Trixie):
 
-1. **Automatische tests** — `python3 -m pytest tests/` — **72 tests, alle geslaagd**:
+1. **Automatische tests** — `python3 -m pytest tests/` — **87 tests, alle geslaagd**:
    - `test_api.py` (27): login, CSRF, uploads, playlists, player-API, back-up/herstel;
    - `test_v11.py` (15): migratie van een echte 1.0-database, HTML-bestanden en ZIP's
      (inclusief path traversal, absolute paden, symlinks, verboden types, ZIP-bom),
      ingebouwde pagina's, ontwerpformaat, overgangen, schaalmodi, verwijderen van een
      overgangsvideo, externe player die een HTML-project downloadt, beveiliging en
      Range-verzoeken van de lokale playerserver;
-   - `test_player.py` (11): mpv-weergave tegen een nagebootste mpv (volgorde, kapotte en
+   - `test_v12.py` (8): migratie 2 → 3 en 1 → 3, willekeurige volgorde en logo in de
+     playerconfiguratie, logo alleen als PNG, ontbrekend of verwijderd logo, media-overzicht en
+     meerdere bestanden tegelijk verwijderen;
+   - `test_player.py` (13): mpv-weergave tegen een nagebootste mpv (volgorde, kapotte en
      ontbrekende bestanden, standby, vastgelopen mpv, overgangen, schaalmodi, HTML overslaan,
      offline doorspelen, cache na herstart);
-   - `test_browser_player.py` (19): de echte playerpagina in Chromium (headless) met
+   - `test_browser_player.py` (24): de echte playerpagina in Chromium (headless) met
      schermafbeeldingen en pixelmetingen.
 2. **Browserweergave** in Chromium: schaalmodi voor foto, video en HTML (vullen = geen zwart en
    proportioneel, passend = zwarte randen, uitrekken = vervormd), kleine foto opgeschaald,

@@ -389,10 +389,10 @@ function Dashboard() {
         <div class="monitor-bar">
           <span class=${'tally' + (cur ? '' : ' off')}><span class="dot"></span>${cur ? 'Op het scherm' : standby ? 'Standby' : 'Geen beeld'}</span>
           <span class="spacer"></span>
-          ${cur && html`<span>${cur.index + 1} / ${cur.total}</span>`}
+          ${cur && html`<span>${strip && strip.shuffle ? 'willekeurig · ' : ''}${cur.index + 1} / ${cur.total}</span>`}
         </div>
         ${strip && strip.items.length > 0 && html`<div class="filmstrip" aria-label="Volgorde in de playlist">
-          ${strip.items.map((it, i) => html`<div class=${'frame' + (cur && cur.index === i && cur.media_id === it.media.id ? ' now' : '')} key=${it.item_id} title=${it.media.name}>
+          ${strip.items.map((it, i) => html`<div class=${'frame' + (cur && cur.media_id === it.media.id && (strip.shuffle || cur.index === i) ? ' now' : '')} key=${it.item_id} title=${it.media.name}>
             <${Thumb} media=${it.media} /></div>`)}</div>`}
       </div>
 
@@ -456,6 +456,26 @@ function Dashboard() {
 // ---------------------------------------------------------------------------
 // Media
 // ---------------------------------------------------------------------------
+function rolesText(roles) {
+  const r = roles || [];
+  const parts = [];
+  if (r.includes('transition')) parts.push('als overgang');
+  if (r.includes('logo')) parts.push('als logo');
+  return parts.length ? ` (${parts.join(', ')})` : '';
+}
+
+function usageBadges(m) {
+  const pl = m.playlists || [];
+  const has = (role) => pl.filter((p) => (p.roles || []).includes(role));
+  const out = [];
+  const asItem = has('item'), asTrans = has('transition'), asLogo = has('logo');
+  const names = (xs) => xs.map((p) => p.name).join(', ');
+  if (asItem.length) out.push(html`<span class="badge signal" title=${names(asItem)}>In ${asItem.length} playlist${asItem.length > 1 ? 's' : ''}</span>`);
+  if (asTrans.length) out.push(html`<span class="badge live" title=${names(asTrans)}>Overgang</span>`);
+  if (asLogo.length) out.push(html`<span class="badge logo-badge" title=${names(asLogo)}>Logo</span>`);
+  return out;
+}
+
 function MediaPage() {
   const [data, setData] = useState(null);
   const [queue, setQueue] = useState([]);
@@ -466,11 +486,16 @@ function MediaPage() {
   const [preview, setPreview] = useState(null);
   const [rename, setRename] = useState(null);
   const [addPage, setAddPage] = useState(false);
+  const [sel, setSel] = useState(() => new Set());
   const fileRef = useRef();
   const running = useRef(false);
   const queueRef = useRef([]);
 
-  const load = async () => setData(await api('GET', '/api/media'));
+  const load = async () => {
+    const d = await api('GET', '/api/media');
+    setData(d);
+    setSel((cur) => new Set([...cur].filter((id) => d.media.some((m) => m.id === id))));
+  };
   useEffect(() => { load().catch(fail); }, []);
 
   const update = (id, patch) => {
@@ -530,9 +555,9 @@ function MediaPage() {
       toast('Bestand verwijderd.');
     } catch (e) {
       if (e.status !== 409) { fail(e); return; }
-      const names = e.data.playlists.map((p) => p.name + ((p.roles || []).includes('transition') ? ' (als overgang)' : '')).join(', ');
+      const names = e.data.playlists.map((p) => p.name + rolesText(p.roles)).join(', ');
       const force = await confirmDialog({ title: 'Bestand is in gebruik', danger: true, confirm: 'Toch verwijderen',
-        body: html`<p>Dit bestand staat in: <strong>${names}</strong>. Het wordt ook uit die playlists gehaald; als overgang wordt het uitgezet.</p>
+        body: html`<p>Dit bestand staat in: <strong>${names}</strong>. Het wordt uit die playlists gehaald; als overgang of logo wordt het uitgezet.</p>
           ${e.data.in_active && html`<div class="notice error"><${Icon} name="alert" /><span>Een van deze playlists speelt nu op een scherm.
             Bevat die playlist daarna niets meer, dan verschijnt het standby-scherm.</span></div>`}` });
       if (!force) return;
@@ -548,16 +573,62 @@ function MediaPage() {
     if (filter === 'image') xs = xs.filter((m) => m.kind === 'image');
     if (filter === 'video') xs = xs.filter((m) => m.kind === 'video');
     if (filter === 'html') xs = xs.filter((m) => m.kind === 'html');
+    if (filter === 'logo') xs = xs.filter((m) => m.kind === 'image' && m.format === 'PNG');
+    if (filter === 'unused') xs = xs.filter((m) => !m.playlists.length);
     if (filter === 'problem') xs = xs.filter((m) => m.status === 'warning' || m.missing);
     const by = { new: (a, b) => b.created_at - a.created_at, name: (a, b) => a.name.localeCompare(b.name, 'nl'),
-      size: (a, b) => b.size - a.size, duration: (a, b) => (b.duration || 0) - (a.duration || 0) }[sort];
+      size: (a, b) => b.storage_bytes - a.storage_bytes, duration: (a, b) => (b.duration || 0) - (a.duration || 0) }[sort];
     return [...xs].sort(by);
   }, [data, q, filter, sort]);
 
+  const toggle = (id) => setSel((cur) => { const n = new Set(cur); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const removeSelected = async () => {
+    const chosen = data.media.filter((m) => sel.has(m.id));
+    if (!chosen.length) return;
+    const bytes = chosen.reduce((a, m) => a + m.storage_bytes, 0);
+    const ok = await confirmDialog({ title: `${chosen.length} bestand${chosen.length > 1 ? 'en' : ''} verwijderen?`, danger: true, confirm: 'Verwijderen',
+      body: html`<p>Deze bestanden worden definitief van de Raspberry Pi verwijderd (${fmtBytes(bytes)}):</p>
+        <ul class="small">${chosen.slice(0, 12).map((m) => html`<li>${m.name}</li>`)}${chosen.length > 12 && html`<li>en nog ${chosen.length - 12}</li>`}</ul>` });
+    if (!ok) return;
+    const ids = chosen.map((m) => m.id);
+    try {
+      const r = await api('POST', '/api/media/delete', { ids });
+      toast(`${r.deleted} bestand${r.deleted > 1 ? 'en' : ''} verwijderd.`);
+    } catch (e) {
+      if (e.status !== 409) { fail(e); return; }
+      const force = await confirmDialog({ title: 'Sommige bestanden zijn in gebruik', danger: true, confirm: 'Toch alles verwijderen',
+        body: html`<p>Deze bestanden worden gebruikt en worden ook uit de playlists gehaald (als overgang of logo: uitgezet):</p>
+          <ul class="small">${e.data.in_use.map((u) => html`<li><strong>${u.name}</strong>: ${u.playlists.map((p) => p.name + rolesText(p.roles)).join(', ')}</li>`)}</ul>
+          ${e.data.in_active && html`<div class="notice error"><${Icon} name="alert" /><span>Een van deze playlists speelt nu op een scherm.
+            Bevat die playlist daarna niets meer, dan verschijnt het standby-scherm.</span></div>`}` });
+      if (!force) return;
+      try { const r = await api('POST', '/api/media/delete', { ids, force: true }); toast(`${r.deleted} bestanden verwijderd en uit playlists gehaald.`); }
+      catch (e2) { fail(e2); return; }
+    }
+    setSel(new Set());
+    load().catch(fail);
+  };
+  const sum = data && data.summary;
+  const usedPct = sum ? Math.round(100 * (sum.disk_total - sum.disk_free) / sum.disk_total) : 0;
+
   return html`<div>
     <div class="page-head"><div><h1>Media</h1>
-      <p>Foto's (PNG, JPEG, WebP), video's (bij voorkeur MP4 met H.264 en AAC, maximaal 1080p30) en HTML-pagina's (.html of een .zip met index.html en bijbehorende bestanden).</p></div>
+      <p>Alles wat op deze Raspberry Pi staat: foto's (PNG, JPEG, WebP), video's (bij voorkeur MP4 met H.264 en AAC, maximaal 1080p30),
+        HTML-pagina's (.html of .zip met index.html) en logo's (PNG). Hier kun je alles bekijken en verwijderen.</p></div>
       <button class="btn" onClick=${() => setAddPage(true)}><${Icon} name="globe" />Lokale pagina toevoegen</button></div>
+
+    ${sum && html`<section class="vitals storage" aria-label="Opslag">
+      <div class="vital"><div class="k">Media op de Pi</div><div class="v">${fmtBytes(sum.media_bytes)}</div>
+        <div class="muted small">${data.media.length} bestanden: ${sum.counts.image} foto's, ${sum.counts.video} video's, ${sum.counts.html} HTML</div></div>
+      <div class="vital"><div class="k">Vrije ruimte</div><div class="v">${fmtBytes(sum.disk_free)}</div>
+        <div class=${'meter ' + (usedPct > 90 ? 'bad' : usedPct > 80 ? 'warn' : '')}><span style=${`width:${usedPct}%`}></span></div>
+        <div class="muted small">${usedPct}% van ${fmtBytes(sum.disk_total)} in gebruik</div></div>
+      <div class="vital"><div class="k">Niet gebruikt</div><div class="v">${sum.unused} bestand${sum.unused === 1 ? '' : 'en'}</div>
+        <div class="small">${sum.unused > 0 ? html`<button class="btn small ghost" style="padding-left:0" onClick=${() => setFilter('unused')}>Tonen</button>`
+          : html`<span class="muted">Alles staat in een playlist</span>`}</div></div>
+      <div class="vital"><div class="k">Back-ups</div><div class="v">${fmtBytes(sum.backups_bytes)}</div>
+        <div class="small"><a href="#/instellingen">Beheren onder Instellingen</a></div></div>
+    </section>`}
 
     <div class=${'dropzone' + (over ? ' over' : '')}
       onDragOver=${(e) => { e.preventDefault(); setOver(true); }} onDragLeave=${() => setOver(false)}
@@ -586,29 +657,44 @@ function MediaPage() {
       <input type="search" placeholder="Zoeken op naam" aria-label="Zoeken op naam" value=${q} onInput=${(e) => setQ(e.target.value)} />
       <select aria-label="Filter" value=${filter} onChange=${(e) => setFilter(e.target.value)}>
         <option value="all">Alle media</option><option value="image">Afbeeldingen</option>
-        <option value="video">Video's</option><option value="html">HTML</option><option value="problem">Met waarschuwing</option></select>
+        <option value="video">Video's</option><option value="html">HTML</option><option value="logo">PNG (geschikt als logo)</option>
+        <option value="unused">Niet gebruikt</option><option value="problem">Met waarschuwing</option></select>
       <select aria-label="Sorteren" value=${sort} onChange=${(e) => setSort(e.target.value)}>
         <option value="new">Nieuwste eerst</option><option value="name">Naam</option>
-        <option value="size">Grootte</option><option value="duration">Duur</option></select>
+        <option value="size">Ruimte op de Pi</option><option value="duration">Duur</option></select>
       <span class="spacer"></span>
       ${data && html`<span class="muted small">${list.length} van ${data.media.length}</span>`}
     </div>
+    ${data && data.media.length > 0 && html`<div class=${'selection-bar' + (sel.size ? ' active' : '')}>
+      <label class="check"><input type="checkbox" aria-label="Alles in deze weergave selecteren"
+        checked=${list.length > 0 && list.every((m) => sel.has(m.id))}
+        onChange=${(e) => setSel(e.target.checked ? new Set([...sel, ...list.map((m) => m.id)]) : new Set([...sel].filter((id) => !list.some((m) => m.id === id))))} />
+        ${sel.size ? `${sel.size} geselecteerd` : 'Alles selecteren'}</label>
+      ${sel.size > 0 && html`<span class="muted small">${fmtBytes(data.media.filter((m) => sel.has(m.id)).reduce((a, m) => a + m.storage_bytes, 0))}</span>
+        <span class="spacer"></span>
+        <button class="btn small ghost" onClick=${() => setSel(new Set())}>Selectie wissen</button>
+        <button class="btn small danger solid" onClick=${removeSelected}><${Icon} name="trash" />Selectie verwijderen</button>`}
+    </div>`}
 
     ${!data ? html`<p class="muted">Media laden…</p>` : data.media.length === 0
       ? html`<div class="panel empty-state"><${Icon} name="media" /><h2>Nog geen media</h2>
           <p>Upload foto's, video's of HTML-pagina's om ze in een playlist te zetten.</p></div>`
-      : html`<div class="media-grid">${list.map((m) => html`<article class=${'tile' + (m.missing ? ' missing' : m.status === 'warning' ? ' warn' : '')} key=${m.id}>
+      : list.length === 0 ? html`<div class="panel empty-state"><p>Geen bestanden in deze weergave.</p>
+          <button class="btn" onClick=${() => { setFilter('all'); setQ(''); }}>Alle media tonen</button></div>`
+      : html`<div class="media-grid">${list.map((m) => html`<article class=${'tile' + (m.missing ? ' missing' : m.status === 'warning' ? ' warn' : '') + (sel.has(m.id) ? ' selected' : '')} key=${m.id}>
+          <label class="tile-check" title="Selecteren"><input type="checkbox" checked=${sel.has(m.id)} onChange=${() => toggle(m.id)} aria-label=${'Selecteer ' + m.name} /></label>
           <button class="tile-thumb" onClick=${() => setPreview(m)} aria-label=${'Voorbeeld van ' + m.name}>
             <${Thumb} media=${m} />
             <span class="kind"><${Icon} name=${m.kind} />${m.kind === 'video' ? fmtDur(m.duration) : KIND_LABEL[m.kind]}</span>
           </button>
           <div class="tile-body">
             <div class="tile-name">${m.name}</div>
-            <div class="tile-meta">${mediaMeta(m)}</div>
+            <div class="tile-meta">${mediaMeta(m)}${m.storage_bytes ? ` · ${fmtBytes(m.storage_bytes)} op de Pi` : ''}</div>
             <div class="row" style="gap:6px">
               ${m.missing && html`<span class="badge alert">Bestand ontbreekt</span>`}
               ${m.status === 'warning' && html`<span class="badge live" title=${m.warning}>Waarschuwing</span>`}
-              ${m.playlists.length > 0 && html`<span class="badge signal" title=${m.playlists.map((p) => p.name).join(', ')}>In ${m.playlists.length} playlist${m.playlists.length > 1 ? 's' : ''}</span>`}
+              ${usageBadges(m)}
+              ${!m.playlists.length && html`<span class="badge">Niet gebruikt</span>`}
             </div>
             ${m.warning && html`<p class="small muted">${m.warning}</p>`}
             <div class="tile-actions">
@@ -685,7 +771,7 @@ function PlaylistsPage({ selected }) {
               aria-current=${String(String(p.id) === String(selected))} key=${p.id}
               onClick=${(e) => { if (editorDirty && String(p.id) !== String(selected) && !confirm('Je hebt niet-opgeslagen wijzigingen. Toch naar een andere playlist?')) e.preventDefault(); }}>
               <span class="name">${p.name}${p.players.length > 0 && html`<span class="badge live"><span class="dot"></span>actief</span>`}</span>
-              <span class="meta">${p.item_count} items · ${fmtDur(p.total_duration)}${p.is_default ? ' · standaard' : ''}${p.valid ? '' : ' · niet afspeelbaar'}</span>
+              <span class="meta">${p.item_count} items · ${fmtDur(p.total_duration)}${p.shuffle ? ' · willekeurig' : ''}${p.is_default ? ' · standaard' : ''}${p.valid ? '' : ' · niet afspeelbaar'}</span>
             </a>`)}</nav>
           ${selected ? html`<${PlaylistEditor} key=${selected} id=${selected} onChanged=${loadList} />` : null}
         </div>`}
@@ -704,6 +790,7 @@ function PlaylistEditor({ id, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [picker, setPicker] = useState(false);
   const [tpicker, setTpicker] = useState(null);   // null | 'default' | index van item
+  const [lpicker, setLpicker] = useState(null);   // null | 'all' | index van item (logo)
   const [previewing, setPreviewing] = useState(false);
   const [tpreview, setTpreview] = useState(null);
   const listRef = useRef();
@@ -711,10 +798,10 @@ function PlaylistEditor({ id, onChanged }) {
   draftRef.current = draft;
 
   const toDraft = (p) => ({
-    name: p.name, repeat_mode: p.repeat_mode, mute: p.mute,
+    name: p.name, repeat_mode: p.repeat_mode, mute: p.mute, shuffle: !!p.shuffle,
     transition_enabled: p.transition_enabled, transition_media: p.transition_media, new_item_transition: p.new_item_transition,
     items: p.items.map((it) => ({ key: 'i' + it.item_id, media: it.media, duration: it.duration, scale_mode: it.scale_mode,
-      transition_mode: it.transition_mode, transition_media: it.transition_media })),
+      transition_mode: it.transition_mode, transition_media: it.transition_media, logo_media: it.logo_media || null })),
   });
   const load = async () => {
     const r = await api('GET', `/api/playlists/${id}`);
@@ -728,9 +815,9 @@ function PlaylistEditor({ id, onChanged }) {
 
   const serial = (d) => d && JSON.stringify({
     n: d.name, r: d.repeat_mode, m: d.mute, te: d.transition_enabled, tm: d.transition_media ? d.transition_media.id : null,
-    nt: d.new_item_transition,
+    nt: d.new_item_transition, sh: !!d.shuffle,
     i: d.items.map((x) => [x.media.id, x.duration ?? null, x.scale_mode || null, x.transition_mode,
-      x.transition_mode === 'custom' && x.transition_media ? x.transition_media.id : null]),
+      x.transition_mode === 'custom' && x.transition_media ? x.transition_media.id : null, x.logo_media ? x.logo_media.id : null]),
   });
   const dirty = pl && draft && serial(draft) !== serial(toDraft(pl));
   editorDirty = !!dirty;
@@ -783,7 +870,7 @@ function PlaylistEditor({ id, onChanged }) {
     setBusy(true);
     try {
       await api('PUT', `/api/playlists/${id}`, {
-        name: draft.name, repeat_mode: draft.repeat_mode, mute: draft.mute,
+        name: draft.name, repeat_mode: draft.repeat_mode, mute: draft.mute, shuffle: draft.shuffle,
         transition_enabled: draft.transition_enabled,
         transition_media_id: draft.transition_media ? draft.transition_media.id : null,
         new_item_transition: draft.new_item_transition,
@@ -793,6 +880,7 @@ function PlaylistEditor({ id, onChanged }) {
           scale_mode: it.scale_mode || null,
           transition_mode: it.transition_mode === 'custom' && !it.transition_media ? 'default' : it.transition_mode,
           transition_media_id: it.transition_mode === 'custom' && it.transition_media ? it.transition_media.id : null,
+          logo_media_id: it.logo_media ? it.logo_media.id : null,
         })),
       });
       if (activate) {
@@ -825,6 +913,11 @@ function PlaylistEditor({ id, onChanged }) {
     location.hash = '#/playlists';
   };
 
+  const pickLogo = (m) => {
+    if (lpicker === 'all') { setItems(draft.items.map((it) => ({ ...it, logo_media: m }))); toast(`Logo ingesteld voor alle ${draft.items.length} items. Vergeet niet op te slaan.`); }
+    else patchItem(lpicker, { logo_media: m });
+  };
+  const anyLogo = draft.items.some((it) => it.logo_media);
   const pickTransition = (m) => {
     if (tpicker === 'default') setDraft({ ...draft, transition_media: m });
     else patchItem(tpicker, { transition_mode: 'custom', transition_media: m });
@@ -845,9 +938,15 @@ function PlaylistEditor({ id, onChanged }) {
         <label class="field">Herhalen
           <select value=${draft.repeat_mode} onChange=${(e) => setDraft({ ...draft, repeat_mode: e.target.value })}>
             ${Object.entries(REPEAT_LABELS).map(([k, v]) => html`<option value=${k}>${v}</option>`)}</select></label>
-        <label class="check" style="align-self:end;min-height:38px"><input type="checkbox" checked=${draft.mute}
-          onChange=${(e) => setDraft({ ...draft, mute: e.target.checked })} />Geluid van video's uit</label>
+        <div class="stack" style="gap:6px;align-self:end">
+          <label class="check"><input type="checkbox" checked=${draft.shuffle}
+            onChange=${(e) => setDraft({ ...draft, shuffle: e.target.checked })} />Willekeurige volgorde</label>
+          <label class="check"><input type="checkbox" checked=${draft.mute}
+            onChange=${(e) => setDraft({ ...draft, mute: e.target.checked })} />Geluid van video's uit</label>
+        </div>
       </div>
+      ${draft.shuffle && html`<p class="section-note" style="margin:0">Elke ronde wordt de volgorde opnieuw geschud: elk item komt één keer langs
+        en nooit twee keer achter elkaar. Overgangen en logo's blijven bij hun item horen.</p>`}
       ${pl.problems.length > 0 && !dirty && html`<div class="notice warning"><${Icon} name="alert" /><span>${pl.problems.join(' ')}</span></div>`}
       ${(pl.warnings || []).length > 0 && !dirty && html`<div class="notice"><${Icon} name="info" /><span>${pl.warnings.join(' ')}</span></div>`}
     </div>
@@ -874,8 +973,12 @@ function PlaylistEditor({ id, onChanged }) {
     </div>
 
     <div>
-      <div class="panel-head"><h2>Volgorde</h2>
-        <button class="btn" onClick=${() => setPicker(true)}><${Icon} name="plus" />Media toevoegen</button></div>
+      <div class="panel-head"><h2>${draft.shuffle ? 'Items (willekeurige volgorde)' : 'Volgorde'}</h2>
+        <div class="row">
+          ${draft.items.length > 0 && html`<button class="btn" onClick=${() => setLpicker('all')}><${Icon} name="image" />Logo voor alle items</button>`}
+          ${anyLogo && html`<button class="btn ghost" onClick=${() => setItems(draft.items.map((it) => ({ ...it, logo_media: null })))}>Alle logo's weghalen</button>`}
+          <button class="btn" onClick=${() => setPicker(true)}><${Icon} name="plus" />Media toevoegen</button>
+        </div></div>
       ${draft.items.length === 0 && html`<div class="panel empty-state"><p>Deze playlist is leeg. Voeg media toe om te beginnen.</p></div>`}
       <div class="items" ref=${listRef}>
         ${draft.items.map((it, i) => {
@@ -890,7 +993,14 @@ function PlaylistEditor({ id, onChanged }) {
             <div class="thumb"><${Thumb} media=${it.media} /></div>
             <div class="info"><div class="name" title=${it.media.name}>${it.media.name}</div>
               <div class="muted small"><span class=${'kind-tag k-' + it.media.kind}><${Icon} name=${it.media.kind} />${KIND_LABEL[it.media.kind]}</span>
-                ${it.media.missing ? ' · bestand ontbreekt' : ''}${it.media.status === 'warning' ? ' · waarschuwing' : ''}</div></div>
+                ${it.media.missing ? ' · bestand ontbreekt' : ''}${it.media.status === 'warning' ? ' · waarschuwing' : ''}</div>
+              <div class="logo-ctl">
+                ${it.logo_media && html`<span class="logo-chip" title="Logo linksboven"><img src=${`/api/media/${it.logo_media.id}/playback`} alt="" /><span>${it.logo_media.name}</span></span>`}
+                <button class="btn tiny ghost" aria-label=${(it.logo_media ? 'Logo wijzigen bij ' : 'Logo toevoegen aan ') + it.media.name}
+                  onClick=${() => setLpicker(i)}>${it.logo_media ? 'Wijzigen' : '+ Logo'}</button>
+                ${it.logo_media && html`<button class="btn tiny ghost" aria-label=${'Logo weghalen bij ' + it.media.name}
+                  onClick=${() => patchItem(i, { logo_media: null })}>Weghalen</button>`}
+              </div></div>
             <div class="dur">${it.media.kind !== 'video'
               ? html`<input type="number" min="1" max="86400" step="1" placeholder=${String(defDur)} aria-label="Weergaveduur in seconden"
                   value=${it.duration ?? ''} onInput=${(e) => patchItem(i, { duration: e.target.value === '' ? null : Number(e.target.value) })} /> s`
@@ -903,10 +1013,10 @@ function PlaylistEditor({ id, onChanged }) {
             <button class="btn ghost icon" aria-label=${'Verwijder ' + it.media.name + ' uit playlist'} title="Uit playlist halen"
               onClick=${() => setItems(draft.items.filter((_, j) => j !== i))}><${Icon} name="x" /></button>
           </div>
-          ${draft.transition_enabled && (!last || loopsBack) && html`<div class="connector">
+          ${draft.transition_enabled && (!last || loopsBack || draft.shuffle) && html`<div class="connector">
             <span class="conn-line" aria-hidden="true"></span>
             <${Icon} name="transition" />
-            <span class="small">Overgang ${last ? 'terug naar item 1' : `naar item ${i + 2}`}:</span>
+            <span class="small">${draft.shuffle ? 'Overgang na dit item' : `Overgang ${last ? 'terug naar item 1' : `naar item ${i + 2}`}`}:</span>
             <select aria-label=${`Overgang na ${it.media.name}`} value=${it.transition_mode}
               onChange=${(e) => { const v = e.target.value; if (v === 'custom') setTpicker(i); else patchItem(i, { transition_mode: v }); }}>
               <option value="default">Standaard${draft.transition_media ? ` (${draft.transition_media.name})` : ' (geen gekozen)'}</option>
@@ -935,24 +1045,29 @@ function PlaylistEditor({ id, onChanged }) {
 
     ${picker && html`<${MediaPicker} onClose=${() => setPicker(false)}
       onPick=${(ms) => setItems([...draft.items, ...ms.map((m) => ({ key: 'n' + Math.random().toString(36).slice(2), media: m,
-        duration: null, scale_mode: null, transition_mode: draft.new_item_transition, transition_media: null }))])} />`}
+        duration: null, scale_mode: null, transition_mode: draft.new_item_transition, transition_media: null, logo_media: null }))])} />`}
+    ${lpicker !== null && html`<${MediaPicker} single kind="image" filter=${(m) => m.format === 'PNG'}
+      title=${lpicker === 'all' ? 'Logo voor alle items kiezen' : 'Logo kiezen (PNG)'} confirmLabel="Kiezen"
+      emptyText="Er zijn nog geen PNG-afbeeldingen. Upload eerst een logo als PNG (bij voorkeur met transparante achtergrond)."
+      note="Het logo komt linksboven, maximaal 18% van de breedte en hoogte van het scherm, en wordt niet vergroot."
+      onClose=${() => setLpicker(null)} onPick=${(ms) => ms[0] && pickLogo(ms[0])} />`}
     ${tpicker !== null && html`<${MediaPicker} single kind="video" title="Overgangsvideo kiezen" confirmLabel="Kiezen"
       onClose=${() => setTpicker(null)} onPick=${(ms) => ms[0] && pickTransition(ms[0])} />`}
     ${tpreview && html`<${Modal} title=${'Overgang: ' + tpreview.name} wide onClose=${() => setTpreview(null)}>
       <div class="preview-stage"><${MediaView} media=${tpreview} scale=${globalScale} controls=${false} /></div>
       <p class="muted small">Zo ziet de overgang eruit (${fmtDur(tpreview.duration)}), geschaald volgens de standaardmodus ${SCALE_LABELS[globalScale].toLowerCase()}.</p>
     </${Modal}>`}
-    ${previewing && html`<${PlaylistPreview} items=${draft.items} defDur=${defDur} globalScale=${globalScale}
+    ${previewing && html`<${PlaylistPreview} items=${draft.items} defDur=${defDur} globalScale=${globalScale} shuffle=${draft.shuffle}
       transitionOf=${transitionOf} loopsBack=${loopsBack} onClose=${() => setPreviewing(false)} />`}
   </section>`;
 }
 
-function MediaPicker({ onPick, onClose, single = false, kind = null, title = 'Media toevoegen', confirmLabel = 'Toevoegen' }) {
+function MediaPicker({ onPick, onClose, single = false, kind = null, filter = null, title = 'Media toevoegen', confirmLabel = 'Toevoegen', emptyText = null, note = null }) {
   const [media, setMedia] = useState(null);
   const [sel, setSel] = useState([]);
   const [q, setQ] = useState('');
   useEffect(() => {
-    api('GET', '/api/media').then((r) => setMedia(r.media.filter((m) => !m.missing && (!kind || m.kind === kind)))).catch(fail);
+    api('GET', '/api/media').then((r) => setMedia(r.media.filter((m) => !m.missing && (!kind || m.kind === kind) && (!filter || filter(m))))).catch(fail);
   }, []);
   const toggle = (m) => {
     if (single) { setSel(sel[0] && sel[0].id === m.id ? [] : [m]); return; }
@@ -960,12 +1075,13 @@ function MediaPicker({ onPick, onClose, single = false, kind = null, title = 'Me
   };
   const shown = (media || []).filter((m) => m.name.toLowerCase().includes(q.toLowerCase()));
   return html`<${Modal} title=${title} wide onClose=${onClose} footer=${html`
-      <span class="muted small" style="margin-right:auto">${single ? (sel[0] ? sel[0].name : 'Kies één video') : `${sel.length} gekozen, in deze volgorde toegevoegd`}</span>
+      <span class="muted small" style="margin-right:auto">${single ? (sel[0] ? sel[0].name : (kind === 'video' ? 'Kies één video' : 'Kies één bestand')) : `${sel.length} gekozen, in deze volgorde toegevoegd`}</span>
       <button class="btn" onClick=${onClose}>Annuleren</button>
       <button class="btn primary" disabled=${!sel.length} onClick=${() => { onPick(sel); onClose(); }}>${confirmLabel}</button>`}>
+    ${note && html`<p class="muted small">${note}</p>`}
     <input type="search" placeholder="Zoeken op naam" aria-label="Zoeken op naam" value=${q} onInput=${(e) => setQ(e.target.value)} />
     ${!media ? html`<p class="muted">Laden…</p>` : media.length === 0
-      ? html`<p>${kind === 'video' ? 'Er zijn nog geen video\'s.' : 'Er zijn nog geen media.'} <a href="#/media" onClick=${onClose}>Upload eerst bestanden</a>.</p>`
+      ? html`<p>${emptyText || (kind === 'video' ? 'Er zijn nog geen video\'s.' : 'Er zijn nog geen media.')} <a href="#/media" onClick=${onClose}>Naar Media</a>.</p>`
       : html`<div class="picker-grid">${shown.map((m) => {
           const n = sel.findIndex((x) => x.id === m.id);
           return html`<button class="pick" aria-pressed=${String(n >= 0)} onClick=${() => toggle(m)} key=${m.id}>
@@ -976,17 +1092,31 @@ function MediaPicker({ onPick, onClose, single = false, kind = null, title = 'Me
   </${Modal}>`;
 }
 
-function PlaylistPreview({ items, defDur, globalScale, transitionOf, loopsBack, onClose }) {
-  // Speelt de playlist in de browser na, inclusief overgangen (stap = item of overgang).
-  const [step, setStep] = useState({ i: 0, t: null });
-  const it = items[step.i % items.length];
+function shuffledOrder(n, avoidFirst) {
+  const a = [...Array(n).keys()];
+  for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  if (n > 1 && a[0] === avoidFirst) { const k = 1 + Math.floor(Math.random() * (n - 1)); [a[0], a[k]] = [a[k], a[0]]; }
+  return a;
+}
+
+function PlaylistPreview({ items, defDur, globalScale, shuffle, transitionOf, loopsBack, onClose }) {
+  // Speelt de playlist in de browser na, inclusief overgangen, logo's en willekeurige volgorde.
+  const n = items.length;
+  const initial = () => (shuffle ? shuffledOrder(n, null) : [...Array(n).keys()]);
+  const [step, setStep] = useState(() => ({ order: initial(), pos: 0, t: null }));
+  const idx = step.order[step.pos % n];
+  const it = items[idx];
   const next = useCallback(() => setStep((s) => {
-    if (s.t) return { i: (s.i + 1) % items.length, t: null };
-    const tr = transitionOf(items[s.i % items.length]);
-    const last = s.i === items.length - 1;
-    if (tr && (!last || loopsBack)) return { i: s.i, t: tr };
-    return { i: (s.i + 1) % items.length, t: null };
-  }), [items.length]);
+    const cur = s.order[s.pos];
+    if (!s.t) {
+      const tr = transitionOf(items[cur]);
+      const last = s.pos === n - 1;
+      if (tr && (!last || loopsBack || shuffle)) return { ...s, t: tr };
+    }
+    if (s.pos + 1 < n) return { order: s.order, pos: s.pos + 1, t: null };
+    return { order: shuffle ? shuffledOrder(n, cur) : s.order, pos: 0, t: null };
+  }), [n, shuffle]);
+  const prev = () => setStep((s) => ({ ...s, pos: (s.pos - 1 + n) % n, t: null }));
   useEffect(() => {
     if (step.t || !it || it.media.kind === 'video') return undefined;
     const t = setTimeout(next, 1000 * Number(it.duration || defDur));
@@ -996,13 +1126,14 @@ function PlaylistPreview({ items, defDur, globalScale, transitionOf, loopsBack, 
   return html`<${Modal} title="Voorbeeld van de playlist" wide onClose=${onClose}>
     <div class="preview-stage">
       ${step.t
-        ? html`<${MediaView} key=${'t' + step.i} media=${step.t} scale=${globalScale} controls=${false} onEnded=${next} />`
-        : html`<${MediaView} key=${it.key + step.i} media=${it.media} scale=${scale} controls=${false} onEnded=${next} />`}
+        ? html`<${MediaView} key=${'t' + step.pos} media=${step.t} scale=${globalScale} controls=${false} onEnded=${next} />`
+        : html`<${MediaView} key=${it.key + step.pos} media=${it.media} scale=${scale} controls=${false} onEnded=${next} />`}
+      ${!step.t && it.logo_media && html`<img class="preview-logo" src=${`/api/media/${it.logo_media.id}/playback`} alt="" />`}
     </div>
-    <div class="row"><span>${step.t ? `Overgang: ${step.t.name}` : `${(step.i % items.length) + 1} / ${items.length} · ${it.media.name}`}</span><span class="spacer"></span>
-      <button class="btn small" onClick=${() => setStep((s) => ({ i: (s.i - 1 + items.length) % items.length, t: null }))}>Vorige</button>
+    <div class="row"><span>${step.t ? `Overgang: ${step.t.name}` : `${step.pos + 1} / ${n} · ${it.media.name}`}${shuffle ? ' · willekeurig' : ''}</span><span class="spacer"></span>
+      <button class="btn small" onClick=${prev}>Vorige</button>
       <button class="btn small" onClick=${next}>Volgende</button></div>
-    <p class="muted small">Het voorbeeld speelt in je browser zonder geluid, met dezelfde volgorde, overgangen en schaalmodi als het scherm.</p>
+    <p class="muted small">Het voorbeeld speelt in je browser zonder geluid, met dezelfde volgorde, overgangen, logo's en schaalmodi als het scherm.</p>
   </${Modal}>`;
 }
 

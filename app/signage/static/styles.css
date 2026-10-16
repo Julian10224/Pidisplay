@@ -360,3 +360,27 @@ table.list th { color: var(--ink-3); font-weight: 500; font-size: .82rem; }
 .toast { background: var(--ink); color: var(--paper); padding: 11px 14px; border-radius: var(--r-sm); box-shadow: var(--shadow); font-size: .9rem; display: flex; gap: 10px; align-items: flex-start; }
 .toast.error { background: var(--alert); color: #fff; }
 .toast button { margin-left: auto; background: none; border: 0; color: inherit; cursor: pointer; font-size: 1.1rem; line-height: 1; }
+
+/* ---------- media-overzicht (1.2) ---------- */
+.vitals.storage { margin: 0 0 18px; }
+.selection-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; margin: -4px 0 14px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); }
+.selection-bar.active { border-color: color-mix(in srgb, var(--alert) 40%, var(--line)); position: sticky; top: 8px; z-index: 4; box-shadow: var(--shadow); }
+@media (max-width: 860px) { .selection-bar.active { top: auto; bottom: 84px; position: sticky; } }
+.tile { position: relative; }
+.tile-check { position: absolute; top: 8px; left: 8px; z-index: 2; background: rgba(255, 255, 255, .92); border-radius: 6px;
+  width: 30px; height: 30px; display: grid; place-items: center; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+.tile.selected { border-color: var(--alert); box-shadow: 0 0 0 2px color-mix(in srgb, var(--alert) 35%, transparent); }
+.badge.logo-badge { background: #EFE7FB; color: #6B45B5; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .badge.logo-badge { background: #2E2445; color: #C7B3F0; }
+  :root:not([data-theme="light"]) .tile-check { background: rgba(27, 35, 48, .92); } }
+/* logo per item in de editor */
+.logo-ctl { display: inline-flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.logo-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 2px; border-radius: 5px;
+  background: repeating-conic-gradient(#d9dfe6 0% 25%, #fff 0% 50%) 50% / 10px 10px; border: 1px solid var(--line); }
+.logo-chip img { height: 22px; width: auto; max-width: 70px; object-fit: contain; display: block; }
+.logo-chip span { background: var(--surface); padding: 0 4px; border-radius: 3px; font-size: .78rem; color: var(--ink); max-width: 120px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.btn.tiny { min-height: 24px; padding: 2px 8px; font-size: .78rem; }
+.preview-stage { position: relative; }
+.preview-logo { position: absolute; left: 3%; top: 3%; max-width: 18%; max-height: 18%; width: auto !important; height: auto !important; object-fit: contain; z-index: 2; pointer-events: none; }

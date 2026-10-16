@@ -19,6 +19,12 @@
  *   verouderde stappen genegeerd: geen raceconditions.
  * - HTML draait in een iframe vanaf een andere origin (localhost i.p.v. 127.0.0.1), zodat
  *   een pagina de player niet kan beïnvloeden. Een HTML-item eindigt altijd na zijn duur.
+ * - Willekeurige volgorde: elke ronde is een nieuwe, geschudde volgorde waarin elk item
+ *   precies één keer voorkomt; het eerste item van een ronde is nooit gelijk aan het laatste
+ *   van de vorige. De volgende ronde wordt één keer bepaald, zodat voorladen en afspelen
+ *   hetzelfde item kiezen.
+ * - Een logo hoort bij het item: het zit in dezelfde laag en verschijnt en verdwijnt dus
+ *   tegelijk met het item. Overgangen en het standby-scherm hebben geen logo.
  */
 'use strict';
 
@@ -52,6 +58,7 @@ let failures = 0;
 let timers = [];
 let z = 1;
 let lastRevision = null;
+let roundCache = null;    // volgende geschudde ronde: { base, src, list }
 const errors = [];
 const history = [];
 const slotsByEl = new WeakMap();
@@ -168,6 +175,17 @@ function makeSlot(entry, opts) {
   } else {
     ready = Promise.reject(new Error('onbekend mediatype'));
   }
+  if (entry.logo) {
+    // Logo linksboven, in dezelfde laag als het item. Een kapot logo houdt het item niet tegen.
+    const lg = new Image();
+    lg.className = 'logo';
+    lg.alt = '';
+    lg.decoding = 'async';
+    lg.src = entry.logo;
+    el.appendChild(lg);
+    const itemReady = ready;
+    ready = Promise.all([itemReady, lg.decode().catch(() => { lg.remove(); log(`Logo bij '${entry.name}' kan niet worden getoond.`); })]);
+  }
   stage.appendChild(el);
   slot.promise = timeout(ready, PREPARE_TIMEOUT, entry.name || 'item').then(() => { slot.ready = true; return slot; },
     (err) => { destroySlot(slot); throw err; });
@@ -231,16 +249,49 @@ function rearmTransition(t) {
 // ---------------------------------------------------------------------------
 // Volgorde
 // ---------------------------------------------------------------------------
-/* Bepaal het volgende item zonder iets te wijzigen. */
+function isShuffle(conf, fb) {
+  const pl = (conf && conf.playlist) || {};
+  return !!(fb ? pl.fallback_shuffle : pl.shuffle);
+}
+
+function shuffled(list, avoidFirstId) {
+  const a = list.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  if (a.length > 1 && avoidFirstId != null && a[0].media_id === avoidFirstId) {
+    const k = 1 + Math.floor(Math.random() * (a.length - 1));
+    [a[0], a[k]] = [a[k], a[0]];
+  }
+  return a;
+}
+
+/* Lijst voor de volgende ronde. Bij willekeurige volgorde één keer geschud per ronde
+   (gecachet), zodat voorladen en afspelen dezelfde keuze zien. */
+function nextRound(base, doShuffle, src) {
+  if (!doShuffle) return base;
+  if (roundCache && roundCache.src === src && roundCache.base === base) return roundCache.list;
+  const lastId = current && current.item ? current.item.media_id : null;
+  roundCache = { base, src, list: shuffled(base, lastId) };
+  return roundCache.list;
+}
+
+/* Bepaal het volgende item zonder de afspeeltoestand te wijzigen. */
 function peekNext() {
   let conf = cfg, list = items, idx = index, fb = fallbackActive;
   if (pending) {
-    const curId = current && current.item.media_id;
-    const nlist = pending.items || [];
     conf = pending;
-    list = nlist;
     fb = false;
-    idx = (index >= 0 && index < nlist.length && nlist[index].media_id === curId) ? index : -1;
+    if (isShuffle(pending, false)) {
+      list = nextRound(pending.items || [], true, pending);   // bewerkt + willekeurig: nieuwe ronde
+      idx = -1;
+    } else {
+      const curId = current && current.item.media_id;
+      const nlist = pending.items || [];
+      list = nlist;
+      idx = (index >= 0 && index < nlist.length && nlist[index].media_id === curId) ? index : -1;
+    }
   }
   if (!list.length) return { type: 'standby' };
   let nxt = idx + 1;
@@ -248,8 +299,10 @@ function peekNext() {
     const mode = (conf.playlist || {}).repeat_mode || 'loop';
     if (mode === 'once_hold_last' && !fb) return { type: 'hold' };
     if (mode === 'once_then_default' && !fb && (conf.fallback_items || []).length) {
-      return { type: 'item', conf, list: conf.fallback_items, idx: 0, fb: true };
+      return { type: 'item', conf, list: nextRound(conf.fallback_items, isShuffle(conf, true), 'fallback'), idx: 0, fb: true };
     }
+    const base = fb ? (conf.fallback_items || list) : (conf.items || list);
+    list = nextRound(base, isShuffle(conf, fb), list);
     nxt = 0;
   }
   return { type: 'item', conf, list, idx: nxt, fb };
@@ -258,6 +311,7 @@ function peekNext() {
 function commit(p) {
   if (p.conf !== cfg) { cfg = p.conf; applyRotation(); }
   if (pending && p.conf === pending) pending = null;
+  if (roundCache && p.list === roundCache.list) roundCache = null;   // ronde is begonnen
   items = p.list;
   index = p.idx;
   fallbackActive = p.fb;
@@ -474,7 +528,9 @@ function restart(conf) {
   cancelPreload();
   cfg = conf;
   pending = null;
-  items = (conf.items || []).slice();
+  roundCache = null;
+  items = isShuffle(conf, false) ? shuffled(conf.items || [], current && current.item ? current.item.media_id : null)
+    : (conf.items || []).slice();
   fallbackActive = false;
   index = -1;
   failures = 0;

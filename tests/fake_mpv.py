@@ -121,6 +121,11 @@ def handle(conn):
                         resp["data"] = state["props"][prop]
                     else:
                         resp = {"error": "property unavailable", "request_id": rid}
+                elif name in ("overlay-add", "overlay-remove"):
+                    if log_path:
+                        with open(log_path, "a") as fh:
+                            fh.write(f"set {name} " + (os.path.basename(str(cmd[4])) + f" {cmd[2]},{cmd[3]} {cmd[7]}x{cmd[8]}"
+                                                         if name == "overlay-add" else "") + "\n")
                 elif name == "set_property":
                     if cmd[1] == "pause" and state["props"]["pause"] and not cmd[2]:
                         state["loaded_at"] = time.time()   # afspelen begint nu pas

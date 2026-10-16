@@ -60,7 +60,7 @@ def test_migration_from_v1(tmp_path, monkeypatch):
     from signage.app import create_app
     app = create_app(cfg, start_background=False)
     conn = sqlite3.connect(cfg.db_path)
-    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+    assert conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(__import__('signage.db', fromlist=['x']).SCHEMA_VERSION)
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     row = conn.execute("SELECT name, playback_sha256 FROM media").fetchone()

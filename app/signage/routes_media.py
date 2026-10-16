@@ -37,6 +37,8 @@ def media_row_to_json(cfg, row, usage=None):
                                 "width", "height", "duration", "codec", "status", "warning", "created_at")}
     out["missing"] = not media.playback_available(cfg, row)
     out["has_thumb"] = bool(paths["thumb"] and os.path.exists(paths["thumb"]))
+    out["storage_bytes"] = storage_bytes(paths)
+    out["transparent"] = row["kind"] == "image" and row["playback_name"].endswith(".png")
     if row["kind"] == "html":
         out["html_source"] = "builtin" if row["playback_dir"] == "builtin" else "upload"
         out["html_entry"] = row["html_entry"]
@@ -51,6 +53,29 @@ def media_row_to_json(cfg, row, usage=None):
     if usage is not None:
         out["playlists"] = usage.get(row["id"], [])
     return out
+
+
+def _path_size(p):
+    if not p:
+        return 0
+    try:
+        if os.path.isdir(p):
+            total = 0
+            for root, _d, files in os.walk(p):
+                for f in files:
+                    try:
+                        total += os.path.getsize(os.path.join(root, f))
+                    except OSError:
+                        pass
+            return total
+        return os.path.getsize(p)
+    except OSError:
+        return 0
+
+
+def storage_bytes(paths):
+    """Ruimte op de SD-kaart: origineel + afspeelversie/HTML-map + miniatuur."""
+    return sum(_path_size(p) for p in {paths["file"], paths["playback"], paths["thumb"]} if p)
 
 
 def usage_map(conn):
@@ -74,6 +99,9 @@ def usage_map(conn):
                           "UNION SELECT transition_media_id, id, name FROM playlists "
                           "WHERE transition_media_id IS NOT NULL"):
         add(r["mid"], r["id"], r["name"], "transition")
+    for r in conn.execute("SELECT DISTINCT pi.logo_media_id AS mid, p.id, p.name FROM playlist_items pi "
+                          "JOIN playlists p ON p.id = pi.playlist_id WHERE pi.logo_media_id IS NOT NULL"):
+        add(r["mid"], r["id"], r["name"], "logo")
     return usage
 
 
@@ -115,8 +143,14 @@ def register(app):
         usage = usage_map(conn)
         rows = conn.execute("SELECT * FROM media ORDER BY created_at DESC").fetchall()
         du = shutil.disk_usage(cfg.media_dir)
+        items = [media_row_to_json(cfg, r, usage) for r in rows]
+        backups = sum(_path_size(os.path.join(cfg.backups_dir, f)) for f in os.listdir(cfg.backups_dir))
+        summary = {"media_bytes": sum(m["storage_bytes"] for m in items), "backups_bytes": backups,
+                   "disk_total": du.total, "disk_free": du.free,
+                   "counts": {k: sum(1 for m in items if m["kind"] == k) for k in ("image", "video", "html")},
+                   "unused": sum(1 for m in items if not m.get("playlists"))}
         return jsonify(
-            media=[media_row_to_json(cfg, r, usage) for r in rows],
+            media=items, summary=summary,
             limits={"max_upload_bytes": cfg.max_upload_bytes, "free_bytes": du.free,
                     "min_free_bytes": cfg.min_free_bytes,
                     "allowed": sorted(media.ALLOWED_EXTS)},
@@ -238,32 +272,65 @@ def register(app):
                      (name, hw, hh, media_id))
         return jsonify(media=media_row_to_json(state().cfg, get_media_row(conn, media_id), usage_map(conn)))
 
+    def _delete_rows(conn, cfg, rows, used_by_id):
+        """Verwijder media-records en bestanden; verwijzingen worden eerst opgeruimd."""
+        touched = {p["id"] for mid in used_by_id for p in used_by_id[mid]}
+        with db.Tx(conn):
+            for row in rows:
+                mid = row["id"]
+                conn.execute("DELETE FROM playlist_items WHERE media_id = ?", (mid,))
+                conn.execute("UPDATE playlist_items SET transition_media_id = NULL, transition_mode = "
+                             "CASE WHEN transition_mode = 'custom' THEN 'default' ELSE transition_mode END "
+                             "WHERE transition_media_id = ?", (mid,))
+                conn.execute("UPDATE playlists SET transition_media_id = NULL WHERE transition_media_id = ?", (mid,))
+                conn.execute("UPDATE playlist_items SET logo_media_id = NULL WHERE logo_media_id = ?", (mid,))
+                conn.execute("DELETE FROM media WHERE id = ?", (mid,))
+            for pid in touched:
+                conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (db.now(), pid))
+        for row in rows:
+            paths = media.media_paths(cfg, row)
+            _remove_paths({paths["file"], paths["playback"], paths["thumb"]})
+            log.info("Media verwijderd: %s", row["name"])
+
+    def _in_use_error(conn, used_list, message):
+        from .routes_players import active_playlist_ids
+        active = active_playlist_ids(conn)
+        return ApiError(409, message, playlists=used_list, in_active=any(p["id"] in active for p in used_list))
+
     @app.delete("/api/media/<media_id>")
     def media_delete(media_id):
         cfg = state().cfg
         conn = get_db()
         row = get_media_row(conn, media_id)
         used = usage_map(conn).get(media_id, [])
-        force = request.args.get("force") == "1"
-        if used and not force:
-            from .routes_players import active_playlist_ids
-            active = active_playlist_ids(conn)
-            raise ApiError(409, "Dit bestand wordt gebruikt in een of meer playlists.",
-                           playlists=used, in_active=any(p["id"] in active for p in used))
-        with db.Tx(conn):
-            conn.execute("DELETE FROM playlist_items WHERE media_id = ?", (media_id,))
-            conn.execute("UPDATE playlist_items SET transition_media_id = NULL, transition_mode = "
-                         "CASE WHEN transition_mode = 'custom' THEN 'default' ELSE transition_mode END "
-                         "WHERE transition_media_id = ?", (media_id,))
-            conn.execute("UPDATE playlists SET transition_media_id = NULL WHERE transition_media_id = ?",
-                         (media_id,))
-            for p in used:
-                conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (db.now(), p["id"]))
-            conn.execute("DELETE FROM media WHERE id = ?", (media_id,))
-        paths = media.media_paths(cfg, row)
-        _remove_paths({paths["file"], paths["playback"], paths["thumb"]})
-        log.info("Media verwijderd: %s", row["name"])
+        if used and request.args.get("force") != "1":
+            raise _in_use_error(conn, used, "Dit bestand wordt gebruikt in een of meer playlists.")
+        _delete_rows(conn, cfg, [row], {media_id: used})
         return jsonify(ok=True, removed_from=used)
+
+    @app.post("/api/media/delete")
+    def media_bulk_delete():
+        """Meerdere bestanden tegelijk verwijderen (Media-overzicht)."""
+        cfg = state().cfg
+        conn = get_db()
+        data = body()
+        ids = data.get("ids")
+        if not isinstance(ids, list) or not ids or len(ids) > 1000:
+            raise ApiError(400, "Geef een lijst met te verwijderen bestanden.")
+        rows = [get_media_row(conn, str(i)) for i in dict.fromkeys(ids)]
+        usage = usage_map(conn)
+        used_by_id = {r["id"]: usage.get(r["id"], []) for r in rows}
+        in_use = [{"id": r["id"], "name": r["name"], "playlists": used_by_id[r["id"]]} for r in rows if used_by_id[r["id"]]]
+        if in_use and not data.get("force"):
+            merged = {}
+            for e in in_use:
+                for p in e["playlists"]:
+                    merged.setdefault(p["id"], p)
+            err = _in_use_error(conn, list(merged.values()), f"{len(in_use)} van de {len(rows)} bestanden worden gebruikt.")
+            err.extra["in_use"] = in_use
+            raise err
+        _delete_rows(conn, cfg, rows, used_by_id)
+        return jsonify(ok=True, deleted=len(rows), removed_from=in_use)
 
     def _serve(media_id, which, as_attachment=False):
         cfg = state().cfg

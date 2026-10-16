@@ -54,7 +54,17 @@ def _html_entry(cfg, row):
             "width": row["html_width"], "height": row["html_height"]}
 
 
-def _items_payload(conn, cfg, pl_row, settings, transitions):
+def _logo_entry(conn, cfg, logo_id, cache):
+    if not logo_id:
+        return None
+    if logo_id not in cache:
+        lrow = conn.execute("SELECT * FROM media WHERE id = ? AND kind = 'image'", (logo_id,)).fetchone()
+        cache[logo_id] = ({"media_id": logo_id, "name": lrow["name"], **_file_entry(cfg, lrow)}
+                          if lrow is not None and media.playback_available(cfg, lrow) else None)
+    return cache[logo_id]
+
+
+def _items_payload(conn, cfg, pl_row, settings, transitions, logos=None):
     from .routes_playlists import resolve_transition_id
     out = []
     for it in playlist_items(conn, pl_row["id"]):
@@ -66,6 +76,7 @@ def _items_payload(conn, cfg, pl_row, settings, transitions):
             "duration": None if it["kind"] == "video" else (it["item_duration"] or settings["default_image_duration"]),
             "video_duration": it["duration"] if it["kind"] == "video" else None,
             "transition": None,
+            "logo": _logo_entry(conn, cfg, it["item_logo_media_id"], logos if logos is not None else {}),
         }
         if it["kind"] == "html":
             entry["html"] = _html_entry(cfg, it)
@@ -98,13 +109,15 @@ def build_player_config(conn, cfg, player_row):
         row = conn.execute("SELECT * FROM playlists WHERE id = ?", (pid,)).fetchone()
         if row is not None:
             playlist = {"id": row["id"], "name": row["name"], "repeat_mode": row["repeat_mode"],
-                        "mute": bool(row["mute"])}
-            items = _items_payload(conn, cfg, row, settings, transitions)
+                        "mute": bool(row["mute"]), "shuffle": bool(row["shuffle"])}
+            logos = {}
+            items = _items_payload(conn, cfg, row, settings, transitions, logos)
             default_id = settings.get("default_playlist_id")
             if row["repeat_mode"] == "once_then_default" and default_id and default_id != row["id"]:
                 drow = conn.execute("SELECT * FROM playlists WHERE id = ?", (default_id,)).fetchone()
                 if drow is not None:
-                    fallback = _items_payload(conn, cfg, drow, settings, transitions)
+                    fallback = _items_payload(conn, cfg, drow, settings, transitions, logos)
+                    playlist["fallback_shuffle"] = bool(drow["shuffle"])
     if st.standby_sha is None or not os.path.exists(cfg.standby_path):
         refresh_standby(st, force=True)
     payload = {

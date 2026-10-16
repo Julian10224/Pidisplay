@@ -191,6 +191,13 @@ class Syncer(threading.Thread):
                         it["local"] = h.get("local")
                     else:
                         it["local"] = self.resolve(it)
+                    lg = it.get("logo")
+                    if lg:
+                        try:
+                            lg["local"] = self.resolve(lg)
+                        except Exception as exc:  # noqa: BLE001
+                            it["logo"] = None   # item wordt zonder logo getoond
+                            errors.append(f"Logo bij '{it.get('name')}' niet beschikbaar: {exc}")
                     resolved.append(it)
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"Bestand '{it.get('name')}' niet beschikbaar: {exc}")
@@ -221,6 +228,7 @@ class Syncer(threading.Thread):
         for key in ("items", "fallback_items"):
             for it in cfg.get(key) or []:
                 keep.add(os.path.basename(it.get("local") or ""))
+                keep.add(os.path.basename((it.get("logo") or {}).get("local") or ""))
                 h = it.get("html") or {}
                 if h.get("sha256"):
                     keep.add(h["sha256"] + h.get("ext", ""))

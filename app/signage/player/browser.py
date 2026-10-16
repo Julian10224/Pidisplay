@@ -85,6 +85,8 @@ class PageState:
         out = {k: it.get(k) for k in ("media_id", "name", "kind", "scale", "duration", "video_duration",
                                       "transition")}
         out["key"] = f"{idx}:{it.get('media_id')}"
+        lg = it.get("logo") or {}
+        out["logo"] = self._file(lg.get("local")) if lg.get("local") else None
         if it.get("kind") == "html":
             h = it.get("html") or {}
             if h.get("source") == "builtin":

@@ -7,6 +7,8 @@ Schemaversies
              + playlists.transition_enabled / transition_media_id / new_item_transition
              + playlist_items.scale_mode / transition_mode / transition_media_id
              + instelling scale_mode (standaard 'cover')
+  3  (1.2.0)  + playlists.shuffle (willekeurige volgorde)
+             + playlist_items.logo_media_id (PNG-logo linksboven per item)
 
 Een migratie wordt in één transactie uitgevoerd; vooraf maakt de server een back-up
 (zie app.create_app). Bestaande gegevens blijven behouden; nieuwe kolommen krijgen
@@ -17,7 +19,7 @@ import json
 import sqlite3
 import time
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MEDIA_TABLE_V2 = """
 CREATE TABLE {name} (
@@ -79,7 +81,8 @@ CREATE TABLE IF NOT EXISTS playlists (
     updated_at          REAL NOT NULL,
     transition_enabled  INTEGER NOT NULL DEFAULT 0,
     transition_media_id TEXT REFERENCES media (id) ON DELETE SET NULL,
-    new_item_transition TEXT NOT NULL DEFAULT 'default' CHECK (new_item_transition IN ('default', 'none'))
+    new_item_transition TEXT NOT NULL DEFAULT 'default' CHECK (new_item_transition IN ('default', 'none')),
+    shuffle             INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS playlist_items (
@@ -90,7 +93,8 @@ CREATE TABLE IF NOT EXISTS playlist_items (
     duration            REAL,
     scale_mode          TEXT CHECK (scale_mode IS NULL OR scale_mode IN ('cover', 'contain', 'fill')),
     transition_mode     TEXT NOT NULL DEFAULT 'default' CHECK (transition_mode IN ('default', 'none', 'custom')),
-    transition_media_id TEXT REFERENCES media (id) ON DELETE SET NULL
+    transition_media_id TEXT REFERENCES media (id) ON DELETE SET NULL,
+    logo_media_id       TEXT REFERENCES media (id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS playlist_items_pl ON playlist_items (playlist_id, position);
 CREATE INDEX IF NOT EXISTS playlist_items_media ON playlist_items (media_id);
@@ -180,6 +184,19 @@ def _migrate_1_to_2(conn):
         conn.execute("PRAGMA foreign_keys = ON")
 
 
+def _migrate_2_to_3(conn):
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("ALTER TABLE playlists ADD COLUMN shuffle INTEGER NOT NULL DEFAULT 0")
+        conn.execute("ALTER TABLE playlist_items ADD COLUMN logo_media_id TEXT "
+                     "REFERENCES media (id) ON DELETE SET NULL")
+        conn.execute("UPDATE meta SET value = '3' WHERE key = 'schema_version'")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
 def init_db(path):
     conn = connect(path)
     try:
@@ -198,6 +215,8 @@ def init_db(path):
         else:
             if version < 2:
                 _migrate_1_to_2(conn)
+            if version < 3:
+                _migrate_2_to_3(conn)
             if version > SCHEMA_VERSION:
                 raise RuntimeError(f"Database heeft schemaversie {version}; deze software kent maximaal "
                                    f"{SCHEMA_VERSION}. Gebruik 'signage-admin rollback' niet over een migratie "
