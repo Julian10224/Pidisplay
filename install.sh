@@ -14,6 +14,7 @@
 #     --disable-desktop          Desktop uitzetten als die het scherm bezet houdt
 #     --no-watchdog              Hardware-watchdog niet inschakelen
 #     --no-gpu-mem               config.txt niet aanpassen (gpu_mem voor videodecodering)
+#     --no-browser               Geen Chromium/cage installeren; alleen mpv-weergave (geen HTML)
 #     --help
 #
 #  Het script is veilig opnieuw uit te voeren (ook voor updates): bestaande
@@ -31,6 +32,7 @@ OFFLINE=0
 DISABLE_DESKTOP=0
 WATCHDOG=1
 GPU_MEM=1
+BROWSER=1
 LOG=/var/log/signage-install.log
 NEEDS_REBOOT=0
 
@@ -49,7 +51,8 @@ while [ $# -gt 0 ]; do
         --disable-desktop) DISABLE_DESKTOP=1; shift ;;
         --no-watchdog) WATCHDOG=0; shift ;;
         --no-gpu-mem) GPU_MEM=0; shift ;;
-        -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+        --no-browser) BROWSER=0; shift ;;
+        -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) die "Onbekende optie: $1 (zie --help)" ;;
     esac
 done
@@ -138,7 +141,22 @@ fi
 # -----------------------------------------------------------------------------
 PKGS=(python3 sudo iproute2)
 if has_server; then PKGS+=(python3-flask python3-waitress python3-pil ffmpeg fonts-dejavu-core avahi-daemon); fi
-if has_player; then PKGS+=(mpv); fi
+if has_player; then PKGS+=(mpv fonts-dejavu-core); fi
+
+# Browserweergave (HTML-content, overgangen met voorgeladen lagen): cage + Chromium.
+BROWSER_PKGS=()
+if has_player && [ $BROWSER = 1 ]; then
+    CHROMIUM_PKG=chromium
+    # Raspberry Pi OS Bookworm levert de voor de Pi aangepaste versie als 'chromium-browser'.
+    if apt-cache policy chromium-browser 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+        CHROMIUM_PKG=chromium-browser
+    fi
+    if apt-cache policy "$CHROMIUM_PKG" 2>/dev/null | grep -q 'Candidate:.*snap'; then
+        c_warn "Chromium is op dit systeem alleen als snap beschikbaar; browserweergave wordt overgeslagen (mpv-weergave)."
+    else
+        BROWSER_PKGS=(cage "$CHROMIUM_PKG")
+    fi
+fi
 
 MISSING=()
 for p in "${PKGS[@]}"; do
@@ -156,6 +174,23 @@ if [ ${#MISSING[@]} -gt 0 ]; then
         || die "Installeren van pakketten mislukt; zie $LOG."
 fi
 c_ok "Benodigde pakketten aanwezig"
+
+if [ ${#BROWSER_PKGS[@]} -gt 0 ]; then
+    BMISSING=()
+    for p in "${BROWSER_PKGS[@]}"; do
+        dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || BMISSING+=("$p")
+    done
+    if [ ${#BMISSING[@]} -gt 0 ] && [ $OFFLINE = 1 ]; then
+        c_warn "Browserweergave niet beschikbaar (offline, ontbreekt: ${BMISSING[*]}); de player gebruikt mpv (geen HTML)."
+    elif [ ${#BMISSING[@]} -gt 0 ]; then
+        c_info "Browserweergave installeren (kan op een Pi 3B+ enkele minuten duren): ${BMISSING[*]}"
+        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${BMISSING[@]}"; then
+            c_warn "Chromium/cage konden niet worden geïnstalleerd; de player gebruikt mpv (geen HTML)."
+        fi
+    fi
+    command -v cage >/dev/null && { command -v chromium >/dev/null || command -v chromium-browser >/dev/null; } \
+        && c_ok "Browserweergave beschikbaar (cage + Chromium)"
+fi
 
 # Snelle controle dat de Python-modules werken.
 if has_server; then
@@ -183,13 +218,13 @@ install -d -o signage -g signage -m 0750 /var/lib/signage/player
 REL=/opt/signage/releases/$SIG_VERSION
 install -d -o root -g root -m 0755 /opt/signage /opt/signage/releases
 TMP_REL="$(mktemp -d /opt/signage/releases/.tmp-XXXXXX)"
-cp -r "$SRC/app" "$SRC/VERSION" "$TMP_REL/"
+cp -r "$SRC/app" "$SRC/bin" "$SRC/VERSION" "$TMP_REL/"
 [ -f "$SRC/README.md" ] && cp "$SRC/README.md" "$TMP_REL/"
 find "$TMP_REL" -name "__pycache__" -prune -exec rm -rf {} +
 chown -R root:root "$TMP_REL"
 find "$TMP_REL" -type d -exec chmod 0755 {} +
 find "$TMP_REL" -type f -exec chmod 0644 {} +
-chmod 0755 "$TMP_REL"
+chmod 0755 "$TMP_REL" "$TMP_REL"/bin/*
 
 CUR="$(readlink -f /opt/signage/current 2>/dev/null || true)"
 if [ -d "$REL" ] && diff -rq "$REL" "$TMP_REL" >/dev/null 2>&1; then
@@ -262,6 +297,7 @@ fi
 if has_player; then
     if [ ! -f /etc/signage/player.ini ]; then
         install -o root -g signage -m 0640 "$SRC/config/player.ini" /etc/signage/player.ini
+        [ $BROWSER = 0 ] && set_ini /etc/signage/player.ini renderer mpv
         if [ "$ROLE" = player ]; then
             set_ini /etc/signage/player.ini server_url "$SERVER_URL"
             set_ini /etc/signage/player.ini token "$TOKEN"
@@ -273,12 +309,17 @@ if has_player; then
     else
         [ -n "$SERVER_URL" ] && set_ini /etc/signage/player.ini server_url "$SERVER_URL"
         [ -n "$TOKEN" ] && set_ini /etc/signage/player.ini token "$TOKEN"
+        [ $BROWSER = 0 ] && set_ini /etc/signage/player.ini renderer mpv
         c_ok "Bestaande player-configuratie behouden: /etc/signage/player.ini"
     fi
     chown root:signage /etc/signage/player.ini && chmod 0640 /etc/signage/player.ini
 elif has_server && [ ! -f /etc/signage/player.ini ]; then
     # Server zonder lokale player: leeg token => lokale player uitgeschakeld.
     install -o root -g signage -m 0640 "$SRC/config/player.ini" /etc/signage/player.ini
+fi
+
+if has_player; then
+    install -o root -g root -m 0644 "$SRC/config/pam-signage-player" /etc/pam.d/signage-player
 fi
 
 # -----------------------------------------------------------------------------

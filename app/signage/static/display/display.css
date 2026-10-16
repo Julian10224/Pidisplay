@@ -1,0 +1,15 @@
+/* Gedeelde stijl voor ingebouwde schermpagina's: altijd het volledige scherm, geen marges. */
+*, *::before, *::after { box-sizing: border-box; }
+html, body {
+  width: 100vw; height: 100vh; margin: 0; padding: 0; overflow: hidden;
+  background: #111827; color: #F3F4F6;
+  font-family: "DejaVu Sans", "Segoe UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+.full { width: 100vw; height: 100vh; display: grid; place-items: center; text-align: center; }
+.stack { display: grid; gap: 2.5vmin; justify-items: center; }
+.big { font-size: 26vmin; font-weight: 700; line-height: 1; letter-spacing: -0.02em; }
+.name { font-size: 11vmin; font-weight: 700; line-height: 1.1; max-width: 90vw; overflow-wrap: anywhere; }
+.date { font-size: 6vmin; color: #9CA3AF; }
+.time { font-size: 9vmin; color: #7DD3FC; font-weight: 600; }
+.bar { position: fixed; left: 0; right: 0; bottom: 0; height: 1.2vmin; background: #38BDF8; }

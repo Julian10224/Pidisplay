@@ -145,6 +145,16 @@ const P = {
   power: 'M12 3v9 M6.3 6.3a8 8 0 1 0 11.4 0',
   logout: 'M15 4h4v16h-4 M10 8l-4 4 4 4 M6 12h10',
   check: 'M5 12l5 5 9-10',
+  html: 'M4 4h16v16H4z M9 9l-3 3 3 3 M15 9l3 3-3 3',
+  transition: 'M4 6h7v12H4z M13 6h7v12h-7z M9 12h6 M13 10l2 2-2 2',
+  globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M3 12h18 M12 3c3 3 3 15 0 18 M12 3c-3 3-3 15 0 18',
+};
+const KIND_LABEL = { image: 'Foto', video: 'Video', html: 'HTML' };
+const SCALE_LABELS = { cover: 'Vullen', contain: 'Passend', fill: 'Uitrekken' };
+const SCALE_HELP = {
+  cover: 'Vult het hele scherm; de beeldverhouding blijft behouden, randen worden zo nodig bijgesneden.',
+  contain: 'Het hele beeld blijft zichtbaar met de juiste verhouding; er kunnen zwarte randen ontstaan.',
+  fill: 'Vult het hele scherm zonder bijsnijden; het beeld wordt uitgerekt en kan vervormen.',
 };
 const Icon = ({ name, label }) => html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
   stroke-linecap="round" stroke-linejoin="round" aria-hidden=${label ? undefined : 'true'} role=${label ? 'img' : undefined}
@@ -228,19 +238,34 @@ function Prompt({ title, label, initial = '', confirm = 'Opslaan', onSubmit, onC
 function Thumb({ media, alt = '' }) {
   if (!media) return null;
   if (media.has_thumb) return html`<img src=${`/api/media/${media.id}/thumb`} alt=${alt} loading="lazy" />`;
-  return html`<span style="display:grid;place-items:center;width:100%;height:100%;color:#8592A4">
-    <${Icon} name=${media.kind === 'video' ? 'video' : 'image'} /></span>`;
+  const icon = media.kind === 'video' ? 'video' : media.kind === 'html' ? (media.html_source === 'builtin' ? 'globe' : 'html') : 'image';
+  return html`<span class="thumb-icon"><${Icon} name=${icon} />${media.kind === 'html' && html`<small>${media.html_source === 'builtin' ? 'Lokale pagina' : 'HTML'}</small>`}</span>`;
+}
+
+function mediaMeta(m) {
+  if (m.kind === 'html') {
+    if (m.html_source === 'builtin') return 'Ingebouwde lokale pagina';
+    return `${m.format === 'zip' ? 'HTML-project (ZIP)' : 'HTML-bestand'} · ${fmtBytes(m.size)}${m.html_width ? ` · ontwerp ${m.html_width}×${m.html_height}` : ''}`;
+  }
+  return `${m.width}×${m.height} · ${m.format.toUpperCase()} · ${fmtBytes(m.size)}`;
+}
+
+function MediaView({ media, scale = 'contain', controls = true, onEnded }) {
+  if (media.kind === 'html') {
+    return html`<iframe class="preview-frame" src=${media.preview_url} sandbox="allow-scripts" title=${media.name}></iframe>`;
+  }
+  if (media.kind === 'video') {
+    return html`<video src=${`/api/media/${media.id}/playback`} style=${`object-fit:${scale}`} controls=${controls}
+      autoplay muted playsinline onEnded=${onEnded} onError=${onEnded}></video>`;
+  }
+  return html`<img src=${`/api/media/${media.id}/playback`} style=${`object-fit:${scale}`} alt=${media.name} />`;
 }
 
 function MediaPreview({ media, onClose }) {
   return html`<${Modal} title=${media.name} wide onClose=${onClose}>
-    <div class="preview-stage">
-      ${media.kind === 'video'
-        ? html`<video src=${`/api/media/${media.id}/playback`} controls autoplay muted playsinline></video>`
-        : html`<img src=${`/api/media/${media.id}/playback`} alt=${media.name} />`}
-    </div>
-    <p class="muted small">${media.width}×${media.height} · ${media.codec} · ${fmtBytes(media.size)}
-      ${media.kind === 'video' ? ` · ${fmtDur(media.duration)}` : ''}</p>
+    <div class="preview-stage"><${MediaView} media=${media} /></div>
+    <p class="muted small">${mediaMeta(media)}${media.kind === 'video' ? ` · ${media.codec} · ${fmtDur(media.duration)}` : ''}</p>
+    ${media.kind === 'html' && html`<p class="muted small">Voorbeeld in een afgeschermd venster. Op het scherm vult de pagina het volledige beeld.</p>`}
     ${media.warning && html`<div class="notice warning"><${Icon} name="alert" /><span>${media.warning}</span></div>`}
   </${Modal}>`;
 }
@@ -287,6 +312,21 @@ function AuthScreen({ mode, systemName, onDone }) {
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------
+function rendererText(st) {
+  const parts = [];
+  if (st.renderer === 'browser') {
+    parts.push('Chromium (foto, video, HTML)');
+    const vs = st.video_stats;
+    if (vs && vs.total > 50) parts.push(`${(100 * vs.dropped / vs.total).toFixed(1).replace('.', ',')}% videoframes overgeslagen`);
+    if (st.viewport && st.viewport.screen_w) parts.push(`${st.viewport.screen_w}×${st.viewport.screen_h}`);
+  } else if (st.renderer === 'mpv') {
+    parts.push('mpv (foto, video; geen HTML)');
+    if (st.hwdec) parts.push(st.hwdec === 'no' ? 'softwaredecodering' : `hardwaredecodering (${st.hwdec})`);
+  }
+  if (st.renderer_note) parts.push(st.renderer_note);
+  return parts.join(' · ');
+}
+
 function Dashboard() {
   const [st, setSt] = useState(null);
   const [playlists, setPlaylists] = useState([]);
@@ -339,7 +379,9 @@ function Dashboard() {
     <section class="onair" aria-label="Nu op het scherm">
       <div class="monitor">
         <div class="monitor-screen">
-          ${cur && cur.media_id
+          ${cur && cur.transition ? html`<div class="empty"><${Icon} name="transition" /><br />${cur.name}</div>`
+            : cur && cur.kind === 'html' ? html`<div class="empty"><${Icon} name="html" /><br />HTML-pagina: ${cur.name}</div>`
+            : cur && cur.media_id
             ? html`<img src=${`/api/media/${cur.media_id}/thumb`} alt=${'Nu op het scherm: ' + cur.name} onError=${(e) => { e.target.style.visibility = 'hidden'; }} />`
             : html`<div class="empty">${!local || !local.online ? 'De player meldt zich niet. Controleer of het scherm is aangesloten en herstart de player.'
                 : standby ? 'Het standby-scherm wordt getoond: er is niets om af te spelen.' : 'Player start op…'}</div>`}
@@ -365,6 +407,7 @@ function Dashboard() {
             ? html`<span class="badge ok"><span class="dot"></span>actief</span>`
             : html`<span class="badge alert"><span class="dot"></span>offline</span>`}</dd>
           <dt>Laatst gezien</dt><dd>${local ? fmtAgo(local.last_contact) : '–'}</dd>
+          ${status.renderer && html`<dt>Weergave</dt><dd>${rendererText(status)}</dd>`}
         </dl>
         <label class="field">Playlist op dit scherm
           <select disabled=${busy} value=${eff ? eff.id : ''} onChange=${(e) => switchPlaylist(e.target.value)}>
@@ -422,6 +465,7 @@ function MediaPage() {
   const [sort, setSort] = useState('new');
   const [preview, setPreview] = useState(null);
   const [rename, setRename] = useState(null);
+  const [addPage, setAddPage] = useState(false);
   const fileRef = useRef();
   const running = useRef(false);
   const queueRef = useRef([]);
@@ -453,8 +497,14 @@ function MediaPage() {
     running.current = false;
   };
 
+  const pendingFiles = useRef([]);
+  useEffect(() => {
+    // Bestanden die gekozen werden voordat de lijst geladen was, alsnog verwerken.
+    if (data && pendingFiles.current.length) { const f = pendingFiles.current; pendingFiles.current = []; addFiles(f); }
+  }, [data]);
+
   const addFiles = (files) => {
-    if (!data) return;
+    if (!data) { pendingFiles.current = [...pendingFiles.current, ...files]; return; }
     const allowed = data.limits.allowed;
     let free = data.limits.free_bytes - data.limits.min_free_bytes;
     const items = [...files].map((file) => {
@@ -480,9 +530,9 @@ function MediaPage() {
       toast('Bestand verwijderd.');
     } catch (e) {
       if (e.status !== 409) { fail(e); return; }
-      const names = e.data.playlists.map((p) => p.name).join(', ');
+      const names = e.data.playlists.map((p) => p.name + ((p.roles || []).includes('transition') ? ' (als overgang)' : '')).join(', ');
       const force = await confirmDialog({ title: 'Bestand is in gebruik', danger: true, confirm: 'Toch verwijderen',
-        body: html`<p>Dit bestand staat in: <strong>${names}</strong>. Het wordt ook uit die playlists gehaald.</p>
+        body: html`<p>Dit bestand staat in: <strong>${names}</strong>. Het wordt ook uit die playlists gehaald; als overgang wordt het uitgezet.</p>
           ${e.data.in_active && html`<div class="notice error"><${Icon} name="alert" /><span>Een van deze playlists speelt nu op een scherm.
             Bevat die playlist daarna niets meer, dan verschijnt het standby-scherm.</span></div>`}` });
       if (!force) return;
@@ -497,6 +547,7 @@ function MediaPage() {
     let xs = data.media.filter((m) => m.name.toLowerCase().includes(q.toLowerCase()));
     if (filter === 'image') xs = xs.filter((m) => m.kind === 'image');
     if (filter === 'video') xs = xs.filter((m) => m.kind === 'video');
+    if (filter === 'html') xs = xs.filter((m) => m.kind === 'html');
     if (filter === 'problem') xs = xs.filter((m) => m.status === 'warning' || m.missing);
     const by = { new: (a, b) => b.created_at - a.created_at, name: (a, b) => a.name.localeCompare(b.name, 'nl'),
       size: (a, b) => b.size - a.size, duration: (a, b) => (b.duration || 0) - (a.duration || 0) }[sort];
@@ -505,7 +556,8 @@ function MediaPage() {
 
   return html`<div>
     <div class="page-head"><div><h1>Media</h1>
-      <p>Afbeeldingen (PNG, JPEG, WebP) en video's (bij voorkeur MP4 met H.264 en AAC, maximaal 1080p30).</p></div></div>
+      <p>Foto's (PNG, JPEG, WebP), video's (bij voorkeur MP4 met H.264 en AAC, maximaal 1080p30) en HTML-pagina's (.html of een .zip met index.html en bijbehorende bestanden).</p></div>
+      <button class="btn" onClick=${() => setAddPage(true)}><${Icon} name="globe" />Lokale pagina toevoegen</button></div>
 
     <div class=${'dropzone' + (over ? ' over' : '')}
       onDragOver=${(e) => { e.preventDefault(); setOver(true); }} onDragLeave=${() => setOver(false)}
@@ -534,7 +586,7 @@ function MediaPage() {
       <input type="search" placeholder="Zoeken op naam" aria-label="Zoeken op naam" value=${q} onInput=${(e) => setQ(e.target.value)} />
       <select aria-label="Filter" value=${filter} onChange=${(e) => setFilter(e.target.value)}>
         <option value="all">Alle media</option><option value="image">Afbeeldingen</option>
-        <option value="video">Video's</option><option value="problem">Met waarschuwing</option></select>
+        <option value="video">Video's</option><option value="html">HTML</option><option value="problem">Met waarschuwing</option></select>
       <select aria-label="Sorteren" value=${sort} onChange=${(e) => setSort(e.target.value)}>
         <option value="new">Nieuwste eerst</option><option value="name">Naam</option>
         <option value="size">Grootte</option><option value="duration">Duur</option></select>
@@ -544,15 +596,15 @@ function MediaPage() {
 
     ${!data ? html`<p class="muted">Media laden…</p>` : data.media.length === 0
       ? html`<div class="panel empty-state"><${Icon} name="media" /><h2>Nog geen media</h2>
-          <p>Upload afbeeldingen of video's om ze in een playlist te zetten.</p></div>`
+          <p>Upload foto's, video's of HTML-pagina's om ze in een playlist te zetten.</p></div>`
       : html`<div class="media-grid">${list.map((m) => html`<article class=${'tile' + (m.missing ? ' missing' : m.status === 'warning' ? ' warn' : '')} key=${m.id}>
           <button class="tile-thumb" onClick=${() => setPreview(m)} aria-label=${'Voorbeeld van ' + m.name}>
             <${Thumb} media=${m} />
-            <span class="kind"><${Icon} name=${m.kind} />${m.kind === 'video' ? fmtDur(m.duration) : 'Afbeelding'}</span>
+            <span class="kind"><${Icon} name=${m.kind} />${m.kind === 'video' ? fmtDur(m.duration) : KIND_LABEL[m.kind]}</span>
           </button>
           <div class="tile-body">
             <div class="tile-name">${m.name}</div>
-            <div class="tile-meta">${m.width}×${m.height} · ${m.format.toUpperCase()} · ${fmtBytes(m.size)}</div>
+            <div class="tile-meta">${mediaMeta(m)}</div>
             <div class="row" style="gap:6px">
               ${m.missing && html`<span class="badge alert">Bestand ontbreekt</span>`}
               ${m.status === 'warning' && html`<span class="badge live" title=${m.warning}>Waarschuwing</span>`}
@@ -561,16 +613,52 @@ function MediaPage() {
             ${m.warning && html`<p class="small muted">${m.warning}</p>`}
             <div class="tile-actions">
               <button class="btn ghost icon" title="Voorbeeld" aria-label="Voorbeeld" onClick=${() => setPreview(m)}><${Icon} name="eye" /></button>
-              <button class="btn ghost icon" title="Naam wijzigen" aria-label="Naam wijzigen" onClick=${() => setRename(m)}><${Icon} name="edit" /></button>
-              <a class="btn ghost icon" title="Origineel downloaden" aria-label="Origineel downloaden" href=${`/api/media/${m.id}/download`}><${Icon} name="download" /></a>
+              <button class="btn ghost icon" title="Wijzigen" aria-label="Wijzigen" onClick=${() => setRename(m)}><${Icon} name="edit" /></button>
+              ${m.html_source !== 'builtin' && html`<a class="btn ghost icon" title="Origineel downloaden" aria-label="Origineel downloaden" href=${`/api/media/${m.id}/download`}><${Icon} name="download" /></a>`}
               <span class="spacer"></span>
               <button class="btn ghost icon danger" title="Verwijderen" aria-label="Verwijderen" onClick=${() => remove(m)}><${Icon} name="trash" /></button>
             </div>
           </div></article>`)}</div>`}
     ${preview && html`<${MediaPreview} media=${preview} onClose=${() => setPreview(null)} />`}
-    ${rename && html`<${Prompt} title="Naam wijzigen" label="Naam" initial=${rename.name} onClose=${() => setRename(null)}
-      onSubmit=${async (v) => { await api('PATCH', `/api/media/${rename.id}`, { name: v }); toast('Naam gewijzigd.'); await load(); }} />`}
+    ${rename && html`<${MediaEdit} media=${rename} onClose=${() => setRename(null)} onSaved=${() => load().catch(fail)} />`}
+    ${addPage && data && html`<${Modal} title="Lokale pagina toevoegen" onClose=${() => setAddPage(false)}>
+      <p class="muted small">Ingebouwde schermpagina's van dit systeem. Ze werken zonder internet en vullen het hele scherm.</p>
+      <div class="stack" style="gap:8px">${data.builtin_pages.map((pg) => html`<button class="pl-item" key=${pg.id}
+        onClick=${async () => { try { await api('POST', '/api/media/builtin', { page: pg.id }); toast(`'${pg.name}' toegevoegd aan media.`); setAddPage(false); await load(); } catch (e) { fail(e); } }}>
+        <span class="name"><${Icon} name="globe" /> ${pg.name}</span><span class="meta">${pg.description}</span></button>`)}</div>
+    </${Modal}>`}
   </div>`;
+}
+
+function MediaEdit({ media, onClose, onSaved }) {
+  const [name, setName] = useState(media.name);
+  const [w, setW] = useState(media.html_width || '');
+  const [h, setH] = useState(media.html_height || '');
+  const [busy, setBusy] = useState(false);
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const body = { name };
+      if (media.kind === 'html') { body.html_width = w || null; body.html_height = h || null; }
+      await api('PATCH', `/api/media/${media.id}`, body);
+      toast('Opgeslagen.');
+      onSaved();
+      onClose();
+    } catch (err) { fail(err); } finally { setBusy(false); }
+  };
+  return html`<${Modal} title="Media wijzigen" onClose=${onClose}>
+    <form class="stack" style="gap:14px" onSubmit=${submit}>
+      <label class="field">Naam<input type="text" value=${name} maxlength="120" onInput=${(e) => setName(e.target.value)} required /></label>
+      ${media.kind === 'html' && html`<fieldset class="fieldset"><legend>Ontwerpformaat (optioneel)</legend>
+        <p class="muted small">Leeg: de pagina vult het scherm zelf (responsief). Ingevuld, bijvoorbeeld 1920 × 1080: de pagina wordt op dat
+          formaat getekend en daarna volgens de schaalmodus (vullen, passend of uitrekken) over het scherm geschaald.</p>
+        <div class="row"><input type="number" min="100" max="7680" placeholder="breedte" aria-label="Breedte" value=${w} onInput=${(e) => setW(e.target.value)} style="width:120px" />
+          <span>×</span><input type="number" min="100" max="7680" placeholder="hoogte" aria-label="Hoogte" value=${h} onInput=${(e) => setH(e.target.value)} style="width:120px" />
+          <span class="muted small">pixels</span></div></fieldset>`}
+      <div class="modal-foot"><button type="button" class="btn" onClick=${onClose}>Annuleren</button>
+        <button class="btn primary" disabled=${busy || !name.trim()}>Opslaan</button></div>
+    </form></${Modal}>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -615,13 +703,19 @@ function PlaylistEditor({ id, onChanged }) {
   const [settings, setSettings] = useState(null);
   const [busy, setBusy] = useState(false);
   const [picker, setPicker] = useState(false);
+  const [tpicker, setTpicker] = useState(null);   // null | 'default' | index van item
   const [previewing, setPreviewing] = useState(false);
+  const [tpreview, setTpreview] = useState(null);
   const listRef = useRef();
   const draftRef = useRef();
   draftRef.current = draft;
 
-  const toDraft = (p) => ({ name: p.name, repeat_mode: p.repeat_mode, mute: p.mute,
-    items: p.items.map((it) => ({ key: 'i' + it.item_id, media: it.media, duration: it.duration })) });
+  const toDraft = (p) => ({
+    name: p.name, repeat_mode: p.repeat_mode, mute: p.mute,
+    transition_enabled: p.transition_enabled, transition_media: p.transition_media, new_item_transition: p.new_item_transition,
+    items: p.items.map((it) => ({ key: 'i' + it.item_id, media: it.media, duration: it.duration, scale_mode: it.scale_mode,
+      transition_mode: it.transition_mode, transition_media: it.transition_media })),
+  });
   const load = async () => {
     const r = await api('GET', `/api/playlists/${id}`);
     setPl(r.playlist);
@@ -632,7 +726,12 @@ function PlaylistEditor({ id, onChanged }) {
     api('GET', '/api/settings').then((r) => setSettings(r.settings)).catch(() => {});
   }, [id]);
 
-  const serial = (d) => d && JSON.stringify({ n: d.name, r: d.repeat_mode, m: d.mute, i: d.items.map((x) => [x.media.id, x.duration ?? null]) });
+  const serial = (d) => d && JSON.stringify({
+    n: d.name, r: d.repeat_mode, m: d.mute, te: d.transition_enabled, tm: d.transition_media ? d.transition_media.id : null,
+    nt: d.new_item_transition,
+    i: d.items.map((x) => [x.media.id, x.duration ?? null, x.scale_mode || null, x.transition_mode,
+      x.transition_mode === 'custom' && x.transition_media ? x.transition_media.id : null]),
+  });
   const dirty = pl && draft && serial(draft) !== serial(toDraft(pl));
   editorDirty = !!dirty;
   useEffect(() => () => { editorDirty = false; }, []);
@@ -659,6 +758,7 @@ function PlaylistEditor({ id, onChanged }) {
   if (!pl || !draft) return html`<div class="panel"><p class="muted">Laden…</p></div>`;
 
   const setItems = (items) => setDraft({ ...draft, items });
+  const patchItem = (i, patch) => { const items = [...draft.items]; items[i] = { ...items[i], ...patch }; setItems(items); };
   const move = (i, delta) => {
     const j = i + delta;
     if (j < 0 || j >= draft.items.length) return;
@@ -668,16 +768,37 @@ function PlaylistEditor({ id, onChanged }) {
     requestAnimationFrame(() => { const h = listRef.current && listRef.current.children[j]; if (h) h.querySelector('.handle').focus(); });
   };
   const defDur = settings ? settings.default_image_duration : 10;
-  const total = draft.items.reduce((s, it) => s + (it.media.kind === 'image' ? Number(it.duration || defDur) : (it.media.duration || 0)), 0);
+  const globalScale = settings ? settings.scale_mode : 'cover';
+  const transitionOf = (it) => {
+    if (!draft.transition_enabled || it.transition_mode === 'none') return null;
+    if (it.transition_mode === 'custom') return it.transition_media;
+    return draft.transition_media;
+  };
+  const total = draft.items.reduce((s, it) => {
+    const t = transitionOf(it);
+    return s + (it.media.kind === 'video' ? (it.media.duration || 0) : Number(it.duration || defDur)) + (t ? (t.duration || 0) : 0);
+  }, 0);
 
   const save = async (activate) => {
     setBusy(true);
     try {
-      await api('PUT', `/api/playlists/${id}`, { name: draft.name, repeat_mode: draft.repeat_mode, mute: draft.mute,
-        items: draft.items.map((it) => ({ media_id: it.media.id, duration: it.media.kind === 'image' && it.duration !== '' ? it.duration : null })) });
+      await api('PUT', `/api/playlists/${id}`, {
+        name: draft.name, repeat_mode: draft.repeat_mode, mute: draft.mute,
+        transition_enabled: draft.transition_enabled,
+        transition_media_id: draft.transition_media ? draft.transition_media.id : null,
+        new_item_transition: draft.new_item_transition,
+        items: draft.items.map((it) => ({
+          media_id: it.media.id,
+          duration: it.media.kind !== 'video' && it.duration !== '' ? it.duration : null,
+          scale_mode: it.scale_mode || null,
+          transition_mode: it.transition_mode === 'custom' && !it.transition_media ? 'default' : it.transition_mode,
+          transition_media_id: it.transition_mode === 'custom' && it.transition_media ? it.transition_media.id : null,
+        })),
+      });
       if (activate) {
-        await api('POST', `/api/playlists/${id}/activate`, { target: 'default' });
+        const r = await api('POST', `/api/playlists/${id}/activate`, { target: 'default' });
         toast('Opgeslagen en geactiveerd. Het scherm schakelt binnen enkele seconden over.');
+        (r.warnings || []).forEach((w) => toast(w, 'error'));
       } else toast('Playlist opgeslagen.');
       await load();
       onChanged();
@@ -704,6 +825,12 @@ function PlaylistEditor({ id, onChanged }) {
     location.hash = '#/playlists';
   };
 
+  const pickTransition = (m) => {
+    if (tpicker === 'default') setDraft({ ...draft, transition_media: m });
+    else patchItem(tpicker, { transition_mode: 'custom', transition_media: m });
+  };
+  const loopsBack = draft.repeat_mode === 'loop';
+
   return html`<section class="stack" aria-label=${'Playlist ' + pl.name}>
     <div class="panel stack" style="gap:14px">
       <div class="row">
@@ -722,6 +849,28 @@ function PlaylistEditor({ id, onChanged }) {
           onChange=${(e) => setDraft({ ...draft, mute: e.target.checked })} />Geluid van video's uit</label>
       </div>
       ${pl.problems.length > 0 && !dirty && html`<div class="notice warning"><${Icon} name="alert" /><span>${pl.problems.join(' ')}</span></div>`}
+      ${(pl.warnings || []).length > 0 && !dirty && html`<div class="notice"><${Icon} name="info" /><span>${pl.warnings.join(' ')}</span></div>`}
+    </div>
+
+    <div class="panel stack transitions-panel" style="gap:12px">
+      <div class="panel-head" style="margin:0"><h2><${Icon} name="transition" /> Overgangen</h2>
+        <label class="check"><input type="checkbox" checked=${draft.transition_enabled}
+          onChange=${(e) => setDraft({ ...draft, transition_enabled: e.target.checked })} />Overgangsvideo's gebruiken</label></div>
+      <p class="section-note" style="margin:0">Een overgang is een video die na een item volledig wordt afgespeeld, vóór het volgende item verschijnt.
+        Overgangen veranderen niets aan de media of de volgorde.</p>
+      ${draft.transition_enabled && html`<div class="form-grid">
+        <div class="field">Standaardovergang
+          <div class="row" style="gap:8px">
+            ${draft.transition_media ? html`<span class="tchip"><span class="thumb"><${Thumb} media=${draft.transition_media} /></span>${draft.transition_media.name}
+                <span class="muted small">${fmtDur(draft.transition_media.duration)}</span></span>`
+              : html`<span class="muted">Nog geen video gekozen</span>`}
+            <button class="btn small" onClick=${() => setTpicker('default')}>Video kiezen</button>
+            ${draft.transition_media && html`<button class="btn small ghost" onClick=${() => setTpreview(draft.transition_media)}><${Icon} name="play" />Bekijken</button>`}
+          </div></div>
+        <label class="field">Nieuwe items krijgen
+          <select value=${draft.new_item_transition} onChange=${(e) => setDraft({ ...draft, new_item_transition: e.target.value })}>
+            <option value="default">de standaardovergang</option><option value="none">geen overgang</option></select></label>
+      </div>`}
     </div>
 
     <div>
@@ -729,23 +878,49 @@ function PlaylistEditor({ id, onChanged }) {
         <button class="btn" onClick=${() => setPicker(true)}><${Icon} name="plus" />Media toevoegen</button></div>
       ${draft.items.length === 0 && html`<div class="panel empty-state"><p>Deze playlist is leeg. Voeg media toe om te beginnen.</p></div>`}
       <div class="items" ref=${listRef}>
-        ${draft.items.map((it, i) => html`<div class=${'item' + (it.media.missing ? ' bad' : '')} key=${it.key}>
-          <span class="pos">${i + 1}</span>
-          <button class="handle" title="Slepen om te verplaatsen (of pijltjestoetsen)" aria-label=${`Verplaats ${it.media.name}, positie ${i + 1}`}
-            onKeyDown=${(e) => { if (e.key === 'ArrowUp') { e.preventDefault(); move(i, -1); } if (e.key === 'ArrowDown') { e.preventDefault(); move(i, 1); } }}>
-            <${Icon} name="grip" /></button>
-          <div class="thumb"><${Thumb} media=${it.media} /></div>
-          <div class="info"><div class="name" title=${it.media.name}>${it.media.name}</div>
-            <div class="muted small">${it.media.kind === 'video' ? 'Video' : 'Afbeelding'}${it.media.missing ? ' · bestand ontbreekt' : ''}${it.media.status === 'warning' ? ' · waarschuwing' : ''}</div></div>
-          <div class="dur">${it.media.kind === 'image'
-            ? html`<input type="number" min="1" max="86400" step="1" placeholder=${String(defDur)} aria-label="Weergaveduur in seconden"
-                value=${it.duration ?? ''} onInput=${(e) => { const items = [...draft.items]; items[i] = { ...it, duration: e.target.value === '' ? null : Number(e.target.value) }; setItems(items); }} /> s`
-            : html`<span>${fmtDur(it.media.duration)} (volledig)</span>`}</div>
-          <button class="btn ghost icon" aria-label=${'Verwijder ' + it.media.name + ' uit playlist'} title="Uit playlist halen"
-            onClick=${() => setItems(draft.items.filter((_, j) => j !== i))}><${Icon} name="x" /></button>
-        </div>`)}
+        ${draft.items.map((it, i) => {
+          const t = transitionOf(it);
+          const last = i === draft.items.length - 1;
+          return html`<div class=${'item-wrap' + (it.media.missing ? ' bad' : '')} key=${it.key}>
+          <div class="item">
+            <span class="pos">${i + 1}</span>
+            <button class="handle" title="Slepen om te verplaatsen (of pijltjestoetsen)" aria-label=${`Verplaats ${it.media.name}, positie ${i + 1}`}
+              onKeyDown=${(e) => { if (e.key === 'ArrowUp') { e.preventDefault(); move(i, -1); } if (e.key === 'ArrowDown') { e.preventDefault(); move(i, 1); } }}>
+              <${Icon} name="grip" /></button>
+            <div class="thumb"><${Thumb} media=${it.media} /></div>
+            <div class="info"><div class="name" title=${it.media.name}>${it.media.name}</div>
+              <div class="muted small"><span class=${'kind-tag k-' + it.media.kind}><${Icon} name=${it.media.kind} />${KIND_LABEL[it.media.kind]}</span>
+                ${it.media.missing ? ' · bestand ontbreekt' : ''}${it.media.status === 'warning' ? ' · waarschuwing' : ''}</div></div>
+            <div class="dur">${it.media.kind !== 'video'
+              ? html`<input type="number" min="1" max="86400" step="1" placeholder=${String(defDur)} aria-label="Weergaveduur in seconden"
+                  value=${it.duration ?? ''} onInput=${(e) => patchItem(i, { duration: e.target.value === '' ? null : Number(e.target.value) })} /> s`
+              : html`<span>${fmtDur(it.media.duration)} (volledig)</span>`}</div>
+            <select class="scale-select" aria-label="Schaalmodus" title="Schaalmodus" value=${it.scale_mode || ''}
+              disabled=${it.media.kind === 'html' && !it.media.html_width}
+              onChange=${(e) => patchItem(i, { scale_mode: e.target.value || null })}>
+              <option value="">${it.media.kind === 'html' && !it.media.html_width ? 'Pagina vult zelf' : `Standaard (${SCALE_LABELS[globalScale]})`}</option>
+              ${Object.entries(SCALE_LABELS).map(([k, v]) => html`<option value=${k}>${v}</option>`)}</select>
+            <button class="btn ghost icon" aria-label=${'Verwijder ' + it.media.name + ' uit playlist'} title="Uit playlist halen"
+              onClick=${() => setItems(draft.items.filter((_, j) => j !== i))}><${Icon} name="x" /></button>
+          </div>
+          ${draft.transition_enabled && (!last || loopsBack) && html`<div class="connector">
+            <span class="conn-line" aria-hidden="true"></span>
+            <${Icon} name="transition" />
+            <span class="small">Overgang ${last ? 'terug naar item 1' : `naar item ${i + 2}`}:</span>
+            <select aria-label=${`Overgang na ${it.media.name}`} value=${it.transition_mode}
+              onChange=${(e) => { const v = e.target.value; if (v === 'custom') setTpicker(i); else patchItem(i, { transition_mode: v }); }}>
+              <option value="default">Standaard${draft.transition_media ? ` (${draft.transition_media.name})` : ' (geen gekozen)'}</option>
+              <option value="none">Geen overgang</option>
+              <option value="custom">${it.transition_mode === 'custom' && it.transition_media ? `Eigen: ${it.transition_media.name}` : 'Andere video…'}</option>
+            </select>
+            ${it.transition_mode === 'custom' && html`<button class="btn small ghost" onClick=${() => setTpicker(i)}>Wijzigen</button>`}
+            ${t && html`<button class="btn small ghost" onClick=${() => setTpreview(t)}><${Icon} name="play" />Bekijken</button>`}
+          </div>`}
+        </div>`;
+        })}
       </div>
-      ${draft.items.length > 0 && html`<p class="muted small" style="margin-top:8px">Lege duur = standaardduur (${String(defDur).replace('.', ',')} s). Video's spelen altijd volledig af.</p>`}
+      ${draft.items.length > 0 && html`<p class="muted small" style="margin-top:8px">Lege duur = standaardduur (${String(defDur).replace('.', ',')} s) voor foto's en HTML.
+        Video's en overgangen spelen altijd volledig af. Schaalmodus <em>Standaard</em> volgt de instelling onder Instellingen → Weergave.</p>`}
     </div>
 
     <div class=${dirty ? 'dirty-bar' : 'row'}>
@@ -759,53 +934,75 @@ function PlaylistEditor({ id, onChanged }) {
     </div>
 
     ${picker && html`<${MediaPicker} onClose=${() => setPicker(false)}
-      onPick=${(ms) => setItems([...draft.items, ...ms.map((m) => ({ key: 'n' + Math.random().toString(36).slice(2), media: m, duration: null }))])} />`}
-    ${previewing && html`<${PlaylistPreview} items=${draft.items} defDur=${defDur} onClose=${() => setPreviewing(false)} />`}
+      onPick=${(ms) => setItems([...draft.items, ...ms.map((m) => ({ key: 'n' + Math.random().toString(36).slice(2), media: m,
+        duration: null, scale_mode: null, transition_mode: draft.new_item_transition, transition_media: null }))])} />`}
+    ${tpicker !== null && html`<${MediaPicker} single kind="video" title="Overgangsvideo kiezen" confirmLabel="Kiezen"
+      onClose=${() => setTpicker(null)} onPick=${(ms) => ms[0] && pickTransition(ms[0])} />`}
+    ${tpreview && html`<${Modal} title=${'Overgang: ' + tpreview.name} wide onClose=${() => setTpreview(null)}>
+      <div class="preview-stage"><${MediaView} media=${tpreview} scale=${globalScale} controls=${false} /></div>
+      <p class="muted small">Zo ziet de overgang eruit (${fmtDur(tpreview.duration)}), geschaald volgens de standaardmodus ${SCALE_LABELS[globalScale].toLowerCase()}.</p>
+    </${Modal}>`}
+    ${previewing && html`<${PlaylistPreview} items=${draft.items} defDur=${defDur} globalScale=${globalScale}
+      transitionOf=${transitionOf} loopsBack=${loopsBack} onClose=${() => setPreviewing(false)} />`}
   </section>`;
 }
 
-function MediaPicker({ onPick, onClose }) {
+function MediaPicker({ onPick, onClose, single = false, kind = null, title = 'Media toevoegen', confirmLabel = 'Toevoegen' }) {
   const [media, setMedia] = useState(null);
   const [sel, setSel] = useState([]);
   const [q, setQ] = useState('');
-  useEffect(() => { api('GET', '/api/media').then((r) => setMedia(r.media.filter((m) => !m.missing))).catch(fail); }, []);
-  const toggle = (m) => setSel(sel.find((x) => x.id === m.id) ? sel.filter((x) => x.id !== m.id) : [...sel, m]);
+  useEffect(() => {
+    api('GET', '/api/media').then((r) => setMedia(r.media.filter((m) => !m.missing && (!kind || m.kind === kind)))).catch(fail);
+  }, []);
+  const toggle = (m) => {
+    if (single) { setSel(sel[0] && sel[0].id === m.id ? [] : [m]); return; }
+    setSel(sel.find((x) => x.id === m.id) ? sel.filter((x) => x.id !== m.id) : [...sel, m]);
+  };
   const shown = (media || []).filter((m) => m.name.toLowerCase().includes(q.toLowerCase()));
-  return html`<${Modal} title="Media toevoegen" wide onClose=${onClose} footer=${html`
-      <span class="muted small" style="margin-right:auto">${sel.length} gekozen, in deze volgorde toegevoegd</span>
+  return html`<${Modal} title=${title} wide onClose=${onClose} footer=${html`
+      <span class="muted small" style="margin-right:auto">${single ? (sel[0] ? sel[0].name : 'Kies één video') : `${sel.length} gekozen, in deze volgorde toegevoegd`}</span>
       <button class="btn" onClick=${onClose}>Annuleren</button>
-      <button class="btn primary" disabled=${!sel.length} onClick=${() => { onPick(sel); onClose(); }}>Toevoegen</button>`}>
+      <button class="btn primary" disabled=${!sel.length} onClick=${() => { onPick(sel); onClose(); }}>${confirmLabel}</button>`}>
     <input type="search" placeholder="Zoeken op naam" aria-label="Zoeken op naam" value=${q} onInput=${(e) => setQ(e.target.value)} />
     ${!media ? html`<p class="muted">Laden…</p>` : media.length === 0
-      ? html`<p>Er zijn nog geen media. <a href="#/media" onClick=${onClose}>Upload eerst bestanden</a>.</p>`
+      ? html`<p>${kind === 'video' ? 'Er zijn nog geen video\'s.' : 'Er zijn nog geen media.'} <a href="#/media" onClick=${onClose}>Upload eerst bestanden</a>.</p>`
       : html`<div class="picker-grid">${shown.map((m) => {
           const n = sel.findIndex((x) => x.id === m.id);
           return html`<button class="pick" aria-pressed=${String(n >= 0)} onClick=${() => toggle(m)} key=${m.id}>
             <div class="thumb"><${Thumb} media=${m} /></div>
-            <div class="n">${n >= 0 ? `${n + 1}. ` : ''}${m.name}</div></button>`;
+            <div class="n">${n >= 0 && !single ? `${n + 1}. ` : ''}${m.name}</div>
+            <div class="n muted small">${KIND_LABEL[m.kind]}${m.kind === 'video' ? ' · ' + fmtDur(m.duration) : ''}</div></button>`;
         })}</div>`}
   </${Modal}>`;
 }
 
-function PlaylistPreview({ items, defDur, onClose }) {
-  const [i, setI] = useState(0);
-  const it = items[i % items.length];
-  const next = useCallback(() => setI((x) => (x + 1) % items.length), [items.length]);
+function PlaylistPreview({ items, defDur, globalScale, transitionOf, loopsBack, onClose }) {
+  // Speelt de playlist in de browser na, inclusief overgangen (stap = item of overgang).
+  const [step, setStep] = useState({ i: 0, t: null });
+  const it = items[step.i % items.length];
+  const next = useCallback(() => setStep((s) => {
+    if (s.t) return { i: (s.i + 1) % items.length, t: null };
+    const tr = transitionOf(items[s.i % items.length]);
+    const last = s.i === items.length - 1;
+    if (tr && (!last || loopsBack)) return { i: s.i, t: tr };
+    return { i: (s.i + 1) % items.length, t: null };
+  }), [items.length]);
   useEffect(() => {
-    if (!it || it.media.kind !== 'image') return undefined;
+    if (step.t || !it || it.media.kind === 'video') return undefined;
     const t = setTimeout(next, 1000 * Number(it.duration || defDur));
     return () => clearTimeout(t);
-  }, [i]);
+  }, [step]);
+  const scale = it.scale_mode || globalScale;
   return html`<${Modal} title="Voorbeeld van de playlist" wide onClose=${onClose}>
     <div class="preview-stage">
-      ${it.media.kind === 'video'
-        ? html`<video key=${it.key + i} src=${`/api/media/${it.media.id}/playback`} autoplay muted playsinline onEnded=${next} onError=${next}></video>`
-        : html`<img key=${it.key + i} src=${`/api/media/${it.media.id}/playback`} alt=${it.media.name} />`}
+      ${step.t
+        ? html`<${MediaView} key=${'t' + step.i} media=${step.t} scale=${globalScale} controls=${false} onEnded=${next} />`
+        : html`<${MediaView} key=${it.key + step.i} media=${it.media} scale=${scale} controls=${false} onEnded=${next} />`}
     </div>
-    <div class="row"><span>${(i % items.length) + 1} / ${items.length} · ${it.media.name}</span><span class="spacer"></span>
-      <button class="btn small" onClick=${() => setI((x) => (x - 1 + items.length) % items.length)}>Vorige</button>
+    <div class="row"><span>${step.t ? `Overgang: ${step.t.name}` : `${(step.i % items.length) + 1} / ${items.length} · ${it.media.name}`}</span><span class="spacer"></span>
+      <button class="btn small" onClick=${() => setStep((s) => ({ i: (s.i - 1 + items.length) % items.length, t: null }))}>Vorige</button>
       <button class="btn small" onClick=${next}>Volgende</button></div>
-    <p class="muted small">Het voorbeeld speelt in je browser zonder geluid. Het echte scherm kan iets andere overgangen tonen.</p>
+    <p class="muted small">Het voorbeeld speelt in je browser zonder geluid, met dezelfde volgorde, overgangen en schaalmodi als het scherm.</p>
   </${Modal}>`;
 }
 
@@ -857,7 +1054,8 @@ function PlayersPage() {
       const displays = s.display || [];
       return html`<article class="panel player-card" key=${p.id}>
         <div class="mini-monitor">
-          <div class="monitor-screen">${cur && cur.media_id ? html`<img src=${`/api/media/${cur.media_id}/thumb`} alt="" />`
+          <div class="monitor-screen">${cur && cur.media_id && cur.kind !== 'html' && !cur.transition ? html`<img src=${`/api/media/${cur.media_id}/thumb`} alt="" onError=${(e) => { e.target.style.visibility = 'hidden'; }} />`
+            : cur ? html`<span class="small">${cur.transition ? 'Overgang' : 'HTML-pagina'}</span>`
             : html`<span class="small">${p.online ? (s.state === 'standby' ? 'Standby' : 'Geen beeld') : 'Offline'}</span>`}</div>
           <div class="rot">${p.display_name}${p.rotation ? ` · ${p.rotation}° gedraaid` : ''}</div>
         </div>
@@ -872,6 +1070,7 @@ function PlayersPage() {
             <dt>Nu</dt><dd>${cur ? `${cur.name} (${cur.index + 1}/${cur.total})` : s.state === 'standby' ? 'Standby-scherm' : '–'}</dd>
             <dt>Scherm</dt><dd>${displays.length ? displays.map((d) => html`<div>${d.connector}: ${d.connected ? `aangesloten${d.mode ? `, ${d.mode}` : ''}` : 'niet aangesloten'}</div>`) : 'onbekend'}</dd>
             ${s.version && html`<dt>Player</dt><dd>versie ${s.version}${s.mpv_restarts ? ` · ${s.mpv_restarts}× herstart` : ''}</dd>`}
+            ${s.renderer && html`<dt>Weergave</dt><dd>${rendererText(s)}</dd>`}
             ${s.message && html`<dt>Melding</dt><dd>${s.message}</dd>`}
           </dl>
           <div class="form-grid">
@@ -1005,7 +1204,20 @@ function SettingsPage({ user, onLogout }) {
           </form>
         </${Section}>
 
-        <${Section} id="weergave" title="Weergave" note="De player draait zonder desktop direct op het HDMI-scherm en start automatisch na het opstarten.">
+        <${Section} id="weergave" title="Weergave" note="Hoe foto's, video's en overgangen het scherm vullen, en het beheer van de player.">
+          <fieldset class="fieldset" style="margin-bottom:16px"><legend>Schaalmodus (standaard voor alle items)</legend>
+            <div class="scale-options" role="radiogroup">
+              ${['cover', 'contain', 'fill'].map((mode) => html`<label class="scale-option" key=${mode}>
+                <div class="demo" aria-hidden="true"><span style=${{ cover: 'left:0;right:0;top:-90%;bottom:-90%', contain: 'top:0;bottom:0;left:34%;right:34%', fill: 'inset:0' }[mode]}></span></div>
+                <strong><input type="radio" name="scale" value=${mode} checked=${(s.scale_mode || 'cover') === mode}
+                  onChange=${() => { const prev = s.scale_mode; setS({ ...s, scale_mode: mode });
+                    run('scale', async () => { try { const r = await api('PUT', '/api/settings', { scale_mode: mode }); setS(r.settings); }
+                      catch (e) { setS((cur) => ({ ...cur, scale_mode: prev })); throw e; } }, `Schaalmodus: ${SCALE_LABELS[mode]}.`); }} />
+                  ${SCALE_LABELS[mode]}${mode === 'cover' ? ' (aanbevolen)' : ''}</strong>
+                <span class="small muted">${SCALE_HELP[mode]}</span></label>`)}
+            </div>
+            <p class="muted small">Per playlistitem kun je hiervan afwijken. HTML-pagina's vullen het scherm altijd zelf, behalve als je bij de pagina een vast ontwerpformaat instelt; dan geldt de schaalmodus ook voor de pagina.</p>
+          </fieldset>
           <dl class="facts" style="margin-bottom:14px"><dt>Player</dt><dd>${info.player_service.active ? html`<span class="badge ok">actief</span>` : html`<span class="badge alert">gestopt</span>`}</dd>
             <dt>Automatisch starten</dt><dd>${info.player_service.enabled ? 'aan' : 'uit'}</dd></dl>
           <div class="row">

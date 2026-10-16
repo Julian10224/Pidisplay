@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welkom</title>
+<link rel="stylesheet" href="display.css">
+</head>
+<body>
+<div class="full"><div class="stack">
+  <div class="name" id="n">Welkom</div>
+  <div class="time" id="t">--:--</div>
+  <div class="date" id="d"></div>
+</div></div>
+<div class="bar"></div>
+<script>
+  // De player geeft de systeemnaam mee als ?name=...
+  const name = new URLSearchParams(location.search).get('name');
+  if (name) document.getElementById('n').textContent = name;
+  const pad = (n) => String(n).padStart(2, '0');
+  function tick() {
+    const n = new Date();
+    document.getElementById('t').textContent = pad(n.getHours()) + ':' + pad(n.getMinutes());
+    document.getElementById('d').textContent = n.toLocaleDateString('nl-NL', { weekday: 'long', day: 'numeric', month: 'long' });
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>

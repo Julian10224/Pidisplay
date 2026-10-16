@@ -176,8 +176,15 @@ def create_app(cfg=None, start_background=True):
     cfg = cfg or Config()
     cfg.ensure_dirs()
     backup.apply_pending_restore(cfg, log)
+    existing = db.schema_version(cfg.db_path) if os.path.exists(cfg.db_path) else None
+    if existing is not None and existing < db.SCHEMA_VERSION:
+        # Altijd eerst een back-up vóór een databasemigratie.
+        name = backup.create_backup(cfg, include_media=False, prefix="pre-migration-")
+        log.info("Database wordt bijgewerkt van versie %s naar %s; back-up gemaakt: %s",
+                 existing, db.SCHEMA_VERSION, name)
     db.init_db(cfg.db_path)
     _cleanup_incoming(cfg)
+    repair_html_projects(cfg)
 
     static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
     app = Flask(__name__, static_folder=None)
@@ -383,7 +390,63 @@ def create_app(cfg=None, start_background=True):
 
     if start_background:
         threading.Thread(target=_background_loop, args=(st,), daemon=True, name="signage-bg").start()
+        threading.Thread(target=regenerate_renditions, args=(cfg,), daemon=True, name="signage-rend").start()
+    else:
+        regenerate_renditions(cfg)
     return app
+
+
+def repair_html_projects(cfg):
+    """Pak HTML-projecten opnieuw uit als de map ontbreekt maar het origineel er is
+    (bijvoorbeeld na het terugzetten van een back-up met media)."""
+    from . import htmlpkg
+    conn = db.connect(cfg.db_path)
+    try:
+        for row in conn.execute("SELECT * FROM media WHERE kind = 'html' AND playback_dir = 'html'"):
+            dest = os.path.join(cfg.html_dir, row["playback_name"])
+            src = os.path.join(cfg.files_dir, row["file_name"])
+            if not os.path.isdir(dest) and os.path.isfile(src):
+                try:
+                    htmlpkg.extract_project(src, row["file_name"], dest)
+                    log.info("HTML-project '%s' opnieuw uitgepakt.", row["name"])
+                except htmlpkg.HtmlError as exc:
+                    log.warning("HTML-project '%s' kon niet worden uitgepakt: %s", row["name"], exc)
+    finally:
+        conn.close()
+
+
+def regenerate_renditions(cfg):
+    """Eenmalig na de update naar 1.1: afspeelversies maken die het scherm beeldvullend
+    kunnen bedekken (voorheen werden afbeeldingen alleen 'passend' verkleind)."""
+    from . import media as media_mod
+    conn = db.connect(cfg.db_path)
+    try:
+        if db.get_meta(conn, "renditions_version", "2") == "2":
+            return
+        rows = conn.execute("SELECT * FROM media WHERE kind = 'image'").fetchall()
+        done = 0
+        for row in rows:
+            src = os.path.join(cfg.files_dir, row["file_name"])
+            if not os.path.exists(src):
+                continue
+            try:
+                rend, _w, _h = media_mod.make_image_rendition(src, os.path.join(cfg.renditions_dir, row["id"]),
+                                                              cfg.max_image_size)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Afspeelversie van %s kon niet opnieuw worden gemaakt: %s", row["name"], exc)
+                continue
+            old = os.path.join(cfg.renditions_dir, row["playback_name"])
+            new_name = os.path.basename(rend)
+            conn.execute("UPDATE media SET playback_name = ?, playback_sha256 = ?, playback_size = ? WHERE id = ?",
+                         (new_name, media_mod.sha256_file(rend), os.path.getsize(rend), row["id"]))
+            if old != rend and os.path.exists(old):
+                os.unlink(old)
+            done += 1
+        db.set_meta(conn, "renditions_version", "2")
+        if done:
+            log.info("%d afspeelversie(s) bijgewerkt voor beeldvullende weergave.", done)
+    finally:
+        conn.close()
 
 
 def _cleanup_incoming(cfg):
@@ -399,6 +462,10 @@ def _cleanup_incoming(cfg):
                     shutil.rmtree(p, ignore_errors=True)
             except OSError:
                 pass
+    for f in os.listdir(cfg.html_dir):
+        if f.startswith(".tmp-"):
+            import shutil
+            shutil.rmtree(os.path.join(cfg.html_dir, f), ignore_errors=True)
     for d in (cfg.renditions_dir, cfg.thumbs_dir, cfg.files_dir):
         for f in os.listdir(d):
             if f.endswith(".tmp"):

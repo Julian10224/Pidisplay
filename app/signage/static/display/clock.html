@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Klok</title>
+<link rel="stylesheet" href="display.css">
+</head>
+<body>
+<div class="full"><div class="stack">
+  <div class="big" id="t">--:--</div>
+  <div class="date" id="d"></div>
+</div></div>
+<div class="bar"></div>
+<script>
+  // Lokale tijd van de Raspberry Pi; geen internet nodig.
+  const pad = (n) => String(n).padStart(2, '0');
+  function tick() {
+    const n = new Date();
+    document.getElementById('t').textContent = pad(n.getHours()) + ':' + pad(n.getMinutes());
+    document.getElementById('d').textContent = n.toLocaleDateString('nl-NL', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  }
+  tick();
+  setInterval(tick, 1000);
+</script>
+</body>
+</html>

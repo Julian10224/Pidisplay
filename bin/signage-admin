@@ -33,6 +33,9 @@ Gebruik: sudo signage-admin <opdracht>
   backup [--with-media] [--output MAP]
                             Back-up maken (optioneel ook naar bijv. een USB-stick)
   restore BESTAND           Back-up terugzetten (server herstart)
+  renderer [auto|browser|mpv|reset]
+                            Weergave van de player tonen of kiezen; 'reset' wist de
+                            automatische terugval naar mpv na startproblemen
   rollback                  Terug naar de vorige geïnstalleerde softwareversie
   restart                   Server en player herstarten
   logs                      Logboek van server en player volgen
@@ -92,6 +95,35 @@ case "$cmd" in
         ln -sfn "$cur" /opt/signage/previous.tmp && mv -T /opt/signage/previous.tmp /opt/signage/previous
         systemctl restart signage-server.service signage-player.service 2>/dev/null || true
         echo "Teruggezet naar $(basename "$prev"). (Vorige: $(basename "$cur"))"
+        ;;
+    renderer)
+        cur="$("$PY" -c 'import configparser;c=configparser.ConfigParser(interpolation=None);c.read("/etc/signage/player.ini");print(c.get("player","renderer",fallback="auto"))')"
+        fails="$(cat /var/lib/signage/player/browser-failures 2>/dev/null || echo 0)"
+        case "${2:-}" in
+            "") echo "Weergave: $cur (mislukte browserstarts: $fails)" ;;
+            auto|browser|mpv)
+                need_root renderer
+                "$PY" - "$2" <<'PY'
+import re, sys
+p = "/etc/signage/player.ini"
+s = open(p, encoding="utf-8").read()
+s, n = re.subn(r"(?m)^renderer\s*=.*$", "renderer = " + sys.argv[1], s, count=1)
+if n == 0:
+    s = s.rstrip("\n") + "\nrenderer = " + sys.argv[1] + "\n"
+open(p, "w", encoding="utf-8").write(s)
+PY
+                echo 0 > /var/lib/signage/player/browser-failures
+                chown signage:signage /var/lib/signage/player/browser-failures
+                systemctl restart signage-player.service
+                echo "Weergave ingesteld op $2; player herstart." ;;
+            reset)
+                need_root renderer
+                echo 0 > /var/lib/signage/player/browser-failures
+                chown signage:signage /var/lib/signage/player/browser-failures
+                systemctl restart signage-player.service
+                echo "Terugval gewist; player herstart." ;;
+            *) echo "Gebruik: sudo signage-admin renderer [auto|browser|mpv|reset]" >&2; exit 2 ;;
+        esac
         ;;
     restart)
         need_root restart

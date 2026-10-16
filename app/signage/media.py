@@ -20,12 +20,14 @@ from PIL import Image, ImageOps
 
 IMAGE_EXTS = {".png": "PNG", ".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}
 VIDEO_EXTS = {".mp4", ".m4v", ".mov", ".mkv", ".webm"}
-ALLOWED_EXTS = set(IMAGE_EXTS) | VIDEO_EXTS
+HTML_EXTS = {".html", ".htm", ".zip"}
+ALLOWED_EXTS = set(IMAGE_EXTS) | VIDEO_EXTS | HTML_EXTS
 
 MIME_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
     ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
     ".mkv": "video/x-matroska", ".webm": "video/webm",
+    ".html": "text/html", ".htm": "text/html", ".zip": "application/zip",
 }
 
 THUMB_SIZE = (480, 270)
@@ -95,16 +97,36 @@ def inspect_image(path, ext, max_pixels):
             "duration": None, "codec": fmt.lower(), "warnings": []}
 
 
+MAX_TEXTURE_SIDE = 2048   # VideoCore IV (Pi 3) kan geen grotere texturen verwerken
+
+
+def rendition_size(w, h, screen_w, screen_h, max_side=MAX_TEXTURE_SIDE):
+    """Afmeting van de afspeelversie.
+
+    De afspeelversie is groot genoeg om het scherm beeldvullend (cover) te bedekken:
+    de kortste schaal bepaalt, zodat een staande foto op een liggend scherm niet wazig
+    wordt na het bijsnijden. Nooit vergroten, en nooit groter dan 2048 px per zijde.
+    """
+    scale = min(1.0, max(screen_w / w, screen_h / h))
+    nw, nh = w * scale, h * scale
+    if max(nw, nh) > max_side:
+        f = max_side / max(nw, nh)
+        nw, nh = nw * f, nh * f
+    return max(1, round(nw)), max(1, round(nh))
+
+
 def make_image_rendition(src, dst_base, max_size):
     """Schrijf afspeelversie; retourneert (pad, breedte, hoogte)."""
     with Image.open(src) as img:
         if img.format == "JPEG":
             # Snellere en zuinigere decodering op de Pi bij grote JPEG's.
-            img.draft("RGB", (max_size[0] * 2, max_size[1] * 2))
+            img.draft("RGB", (MAX_TEXTURE_SIDE, MAX_TEXTURE_SIDE))
         img.load()
         img = ImageOps.exif_transpose(img)
         has_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
-        img.thumbnail(max_size, Image.LANCZOS)
+        target = rendition_size(img.size[0], img.size[1], max_size[0], max_size[1])
+        if target != img.size:
+            img = img.resize(target, Image.LANCZOS)
         if has_alpha:
             img = img.convert("RGBA")
             dst = dst_base + ".png"
@@ -254,7 +276,13 @@ def process_incoming(cfg, part_path, original_filename, media_id):
     ext = file_ext(original_filename)
     if ext not in ALLOWED_EXTS:
         raise MediaError(f"Bestandstype '{ext or 'onbekend'}' wordt niet ondersteund. "
-                         "Toegestaan: PNG, JPEG, WebP, MP4, M4V, MOV, MKV, WebM.")
+                         "Toegestaan: PNG, JPEG, WebP, MP4, M4V, MOV, MKV, WebM, HTML en ZIP (HTML-project).")
+    if ext in HTML_EXTS:
+        from . import htmlpkg
+        try:
+            return htmlpkg.process_html_upload(cfg, part_path, original_filename, media_id)
+        except htmlpkg.HtmlError as exc:
+            raise MediaError(str(exc))
     created = []
     try:
         if ext in IMAGE_EXTS:
@@ -293,7 +321,7 @@ def process_incoming(cfg, part_path, original_filename, media_id):
             "file_name": final_name, "playback_name": playback_name, "playback_dir": playback_dir,
             "playback_sha256": sha256_file(playback_path),
             "playback_size": os.path.getsize(playback_path),
-            "thumb_name": thumb_name,
+            "thumb_name": thumb_name, "html_entry": None,
         }
         result["_created"] = created
         return result
@@ -307,10 +335,30 @@ def process_incoming(cfg, part_path, original_filename, media_id):
 
 
 def media_paths(cfg, row):
-    """Absolute paden van een media-record."""
-    base = cfg.files_dir if row["playback_dir"] == "files" else cfg.renditions_dir
+    """Absolute paden van een media-record.
+
+    Voor HTML-projecten is 'playback' de projectmap; voor ingebouwde pagina's None
+    (die worden door de software zelf geleverd).
+    """
+    pdir = row["playback_dir"]
+    if pdir == "builtin":
+        playback = None
+    else:
+        base = {"files": cfg.files_dir, "renditions": cfg.renditions_dir, "html": cfg.html_dir}[pdir]
+        playback = os.path.join(base, row["playback_name"])
     return {
-        "file": os.path.join(cfg.files_dir, row["file_name"]),
-        "playback": os.path.join(base, row["playback_name"]),
+        "file": os.path.join(cfg.files_dir, row["file_name"]) if row["file_name"] else None,
+        "playback": playback,
         "thumb": os.path.join(cfg.thumbs_dir, row["thumb_name"]) if row["thumb_name"] else None,
     }
+
+
+def playback_available(cfg, row):
+    """Is het afspeelbare bestand (of de HTML-map) aanwezig?"""
+    if row["playback_dir"] == "builtin":
+        from . import htmlpkg
+        return row["playback_name"] in htmlpkg.BUILTIN_PAGES
+    p = media_paths(cfg, row)["playback"]
+    if row["playback_dir"] == "html":
+        return os.path.isfile(os.path.join(p, row["html_entry"] or "index.html"))
+    return os.path.exists(p)

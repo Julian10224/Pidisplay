@@ -25,7 +25,8 @@ _backup_lock = threading.Lock()
 def _settings_json(conn):
     s = db.get_settings(conn)
     return {"system_name": s["system_name"], "default_image_duration": s["default_image_duration"],
-            "default_playlist_id": s["default_playlist_id"], "volume": s["volume"]}
+            "default_playlist_id": s["default_playlist_id"], "volume": s["volume"],
+            "scale_mode": s.get("scale_mode", "cover")}
 
 
 def compute_warnings(conn, cfg, st, players):
@@ -53,7 +54,7 @@ def compute_warnings(conn, cfg, st, players):
                                                       "het standby-scherm wordt getoond."})
     missing = 0
     for row in conn.execute("SELECT * FROM media"):
-        if not os.path.exists(media.media_paths(cfg, row)["playback"]):
+        if not media.playback_available(cfg, row):
             missing += 1
     if missing:
         warnings.append({"level": "warning", "text": f"{missing} mediabestand(en) ontbreken op de opslag."})
@@ -132,6 +133,10 @@ def register(app):
             if not 1 <= dur <= 86400:
                 raise ApiError(400, "Standaardduur moet tussen 1 en 86400 seconden liggen.")
             changes["default_image_duration"] = dur
+        if "scale_mode" in data:
+            if data["scale_mode"] not in db.SCALE_MODES:
+                raise ApiError(400, "Ongeldige schaalmodus.")
+            changes["scale_mode"] = data["scale_mode"]
         if "volume" in data:
             try:
                 vol = int(data["volume"])

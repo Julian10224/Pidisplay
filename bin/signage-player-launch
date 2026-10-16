@@ -1,0 +1,66 @@
+#!/bin/bash
+# Startscript van signage-player.service.
+#
+# Kiest de weergave op basis van 'renderer' in /etc/signage/player.ini:
+#   auto (standaard) / browser : Chromium-kiosk onder de compositor cage (foto, video, HTML, overgangen)
+#   mpv                        : mpv direct op het scherm (foto, video, overgangen; geen HTML)
+#
+# Start de browserweergave drie keer achter elkaar niet (cage of Chromium stopt binnen 30 s),
+# dan valt dit script automatisch terug op mpv, zodat het scherm niet zwart blijft.
+# Terugzetten: sudo signage-admin renderer reset
+set -u
+
+PY=/usr/bin/python3
+export PYTHONPATH="${PYTHONPATH:-/opt/signage/current/app}"
+CFG="${SIGNAGE_PLAYER_CONFIG:-/etc/signage/player.ini}"
+STATE_DIR=/var/lib/signage/player
+FAILS_FILE="$STATE_DIR/browser-failures"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+renderer="$("$PY" -c 'import configparser,sys
+c = configparser.ConfigParser(interpolation=None); c.read(sys.argv[1])
+print(c.get("player", "renderer", fallback="auto").strip().lower())' "$CFG" 2>/dev/null || echo auto)"
+
+have_browser() {
+    command -v cage >/dev/null 2>&1 && { command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; }
+}
+
+fails="$(cat "$FAILS_FILE" 2>/dev/null || echo 0)"
+[[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+mode=mpv
+note=""
+case "$renderer" in
+    browser|auto)
+        if ! have_browser; then
+            [ "$renderer" = browser ] && note="Browserweergave gekozen, maar cage of Chromium ontbreekt; mpv wordt gebruikt (HTML wordt overgeslagen)."
+        elif [ "$fails" -ge 3 ]; then
+            note="Browserweergave startte 3 keer niet; teruggevallen op mpv (HTML wordt overgeslagen). Herstel: sudo signage-admin renderer reset"
+        else
+            mode=browser
+        fi
+        ;;
+esac
+
+if [ "$mode" = browser ]; then
+    start=$(date +%s)
+    # -s: wisselen naar een andere console (Ctrl+Alt+F2) blijft mogelijk voor onderhoud.
+    cage -s -- "$PY" -m signage.player.daemon --renderer browser &
+    child=$!
+    trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 0' TERM INT
+    wait "$child"
+    rc=$?
+    ran=$(( $(date +%s) - start ))
+    if [ "$ran" -lt 30 ]; then
+        echo $(( fails + 1 )) > "$FAILS_FILE"
+        echo "signage-player-launch: browserweergave stopte na ${ran}s (poging $(( fails + 1 )))." >&2
+    else
+        echo 0 > "$FAILS_FILE"
+    fi
+    exit "$rc"
+fi
+
+if [ -n "$note" ]; then
+    echo "signage-player-launch: $note" >&2
+    exec "$PY" -m signage.player.daemon --renderer mpv --note "$note"
+fi
+exec "$PY" -m signage.player.daemon --renderer mpv

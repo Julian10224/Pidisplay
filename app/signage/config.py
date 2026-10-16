@@ -101,6 +101,10 @@ class Config:
         return os.path.join(self.media_dir, "thumbs")
 
     @property
+    def html_dir(self):
+        return os.path.join(self.media_dir, "html")
+
+    @property
     def incoming_dir(self):
         return os.path.join(self.media_dir, ".incoming")
 
@@ -162,7 +166,7 @@ class Config:
 
     def ensure_dirs(self):
         for d in (self.data_dir, self.media_dir, self.files_dir, self.renditions_dir,
-                  self.thumbs_dir, self.incoming_dir, self.backups_dir, self.tmp_dir):
+                  self.thumbs_dir, self.html_dir, self.incoming_dir, self.backups_dir, self.tmp_dir):
             os.makedirs(d, exist_ok=True)
 
 
@@ -181,6 +185,10 @@ def read_player_config(path):
         "extra_args": "",
         "poll_interval": "5",
         "heartbeat_interval": "15",
+        "renderer": "auto",
+        "local_port": "8765",
+        "chromium_binary": "auto",
+        "chromium_extra_args": "",
     }})
     if path and os.path.exists(path):
         parser.read(path, encoding="utf-8")

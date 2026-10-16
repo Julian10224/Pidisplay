@@ -1,0 +1,94 @@
+# Wijzigingen
+
+## 1.1.0 — overgangsvideo's, HTML-content en beeldvullende weergave
+
+### Inventarisatie van de bestaande code (1.0.0)
+
+| Onderdeel | Waar | Hoe het in 1.0 werkte |
+|---|---|---|
+| Playlistbeheer | `routes_playlists.py`, editor in `static/app.js` | Items (media, positie, duur) in `playlist_items`; volgorde vervangen bij opslaan. |
+| Afspelen | `player/daemon.py` + `player/mpv.py` | Eén mpv-proces via JSON-IPC; daemon regelde timing, overslaan en herstel. |
+| Databasevelden | `db.py` (schema 1) | `media.kind` ∈ {image, video}; `playlist_items.duration`; geen schaal- of overgangsvelden. |
+| Media-opslag | `/var/lib/signage/media/{files,renditions,thumbs}` | Origineel + afspeelversie (foto's verkleind tot 1920×1080 *passend*). |
+| Schaaltechniek | mpv-standaard | Altijd *passend*: zwarte randen bij afwijkende verhoudingen. |
+| Volgende item | `Player.next_item()` | Timer (foto) of `eof-reached` (video), dan direct `loadfile` van het volgende item. |
+
+Alles is in deze bestaande componenten uitgebreid; er is geen tweede systeem gebouwd.
+Versie 1.0.0 is vóór de wijzigingen volledig bewaard (back-up en `signage-1.0.0.zip`).
+
+### Nieuw
+
+- **Overgangsvideo's**: per playlist aan/uit, standaardovergang uit de mediabibliotheek,
+  per item *standaard / geen / eigen video*, standaard voor nieuwe items, voorbeeld bekijken.
+  Volgorde: item → volledige overgang → volgend item, ook van het laatste naar het eerste item.
+- **HTML-content**: upload van `.html` of `.zip` (veilig uitgepakt, één map per project, vast
+  startbestand), ingebouwde lokale pagina's via een whitelist (Klok, Welkom), instelbare duur,
+  optioneel ontwerpformaat. Voorvertoning in een sandbox.
+- **Beeldvullend**: schaalmodi *Vullen* (standaard), *Passend* en *Uitrekken*, globaal en per
+  item. Afspeelversies van foto's zijn nu groot genoeg om het scherm te bedekken (max. 2048 px).
+- **Browserweergave**: Chromium-kiosk onder cage met een lokale playerpagina die elk item vooraf
+  in een eigen laag laadt (geen zwart beeld tussen items), HTML-isolatie per proces, toezicht op
+  proces, levenstekens en geheugen. **mpv-weergave** blijft als automatische terugval.
+- **Toestandsmachine** in beide weergaven: LOADING_NEXT, STARTING_NEXT, PLAYING,
+  PREPARE_TRANSITION, PLAYING_TRANSITION, HOLD, STANDBY, ERROR, met generatieteller tegen
+  raceconditions.
+- Dashboard en Schermen tonen de weergave, overgeslagen videoframes / decoder en de schermgrootte.
+- `signage-admin renderer [auto|browser|mpv|reset]`.
+
+### Gewijzigde bestanden
+
+Backend: `app/signage/app.py` (migratie met back-up, herstel HTML-projecten, nieuwe
+afspeelversies), `db.py` (schema 2 + migratie), `media.py` (HTML-routing, beeldvullende
+afspeelversies), `routes_media.py` (HTML, lokale pagina's, ontwerpformaat, voorvertoning),
+`routes_playlists.py` (overgangen, schaalmodus), `routes_players.py` (playerconfig met
+overgangen/HTML/schaal), `routes_system.py` (globale schaalmodus), `backup.py`, `config.py`.
+Nieuw: `htmlpkg.py`.
+
+Player: `player/daemon.py` (keuze weergave), `player/mpv.py` (geen verloren events, robuuster).
+Nieuw: `player/sync.py`, `player/mpv_renderer.py`, `player/browser.py`,
+`static/player/{player.html,player.js,player.css}`, `static/display/{clock,welcome}.html`.
+
+Beheerwebsite: `static/app.js`, `static/styles.css`.
+
+Installatie: `install.sh` (cage/Chromium, PAM, `--no-browser`), `uninstall.sh`,
+`systemd/signage-player.service` (sessie op tty1, startscript), `bin/signage-admin`,
+`config/player.ini`, `config/signage.ini`. Nieuw: `bin/signage-player-launch`,
+`config/pam-signage-player`.
+
+Tests: `tests/test_api.py`, `tests/test_player.py` aangepast; nieuw: `tests/test_v11.py`,
+`tests/test_browser_player.py`, `tests/browser/`, `tests/v1_schema.sql`,
+`tests/check_installed_v11.py`, `tests/mpv_visual_check.py`.
+
+### Databasemigratie (schema 1 → 2)
+
+Automatisch bij de eerste start van 1.1, in één transactie, met vooraf een back-up
+`signage-backup-pre-migration-<datum>.tar.gz`:
+
+- `media`: opnieuw opgebouwd (SQLite kan CHECK-regels niet wijzigen) met `kind` ∈
+  {image, video, html}, `playback_dir` ∈ {files, renditions, html, builtin} en nieuwe kolommen
+  `html_entry`, `html_width`, `html_height`. Alle bestaande rijen gekopieerd.
+- `playlists`: `transition_enabled` (0), `transition_media_id` (NULL), `new_item_transition`
+  ('default').
+- `playlist_items`: `scale_mode` (NULL = globaal), `transition_mode` ('default'),
+  `transition_media_id` (NULL).
+- Instelling `scale_mode` = 'cover'.
+- Daarna: verwijzingen gecontroleerd (`foreign_key_check`), afspeelversies van foto's eenmalig
+  opnieuw gemaakt. Er zijn geen velden verwijderd.
+
+### Tests en resultaten
+
+- `pytest tests/`: 69 geslaagd (27 API, 14 1.1-backend, 11 mpv-player, 17 browserplayer).
+- Beheerwebsite in Chromium: 22 stappen (1.0) + 15 stappen (1.1) geslaagd; mobiel zonder
+  horizontaal scrollen; geen externe aanvragen.
+- Echte mpv op Xvfb: schaalmodi foto en video geslaagd.
+- Keten startscript → cage → daemon → Chromium: playlist speelde af; terugval naar mpv na
+  drie mislukte starts werkte.
+- Upgrade van een geïnstalleerd 1.0.0-systeem met gegevens naar 1.1.0 met `install.sh`:
+  migratie en `check_installed_v11.py` (echte mpv) 13/13.
+- Niet getest: echte Raspberry Pi, fysiek scherm, Chromium-videodecodering op de Pi 3B+,
+  cage met logind op tty1, reboot. Zie README §18.
+
+## 1.0.0
+
+Eerste versie: lokale server met beheerwebsite, SQLite, mediabeheer, playlists, players,
+mpv-player op DRM, back-up/herstel, installer, systemd-units, CLI.

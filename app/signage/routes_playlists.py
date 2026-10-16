@@ -1,7 +1,14 @@
-"""API: playlists maken, bewerken, valideren en activeren."""
+"""API: playlists maken, bewerken, valideren en activeren.
+
+Sinds 1.1:
+- items kunnen foto's, video's en HTML zijn; duur geldt voor foto's en HTML;
+- per item een optionele schaalmodus (anders de globale instelling);
+- overgangen: een playlistbrede overgangsvideo, per item te overschrijven
+  ('default' = playlist-standaard, 'none' = geen, 'custom' = eigen video).
+  Een overgang hoort bij het item ervóór: hij speelt nadat dat item klaar is.
+"""
 
 import logging
-import os
 import re
 import sqlite3
 
@@ -14,6 +21,7 @@ from .routes_media import media_row_to_json
 log = logging.getLogger("signage.playlists")
 
 REPEAT_MODES = ("loop", "once_hold_last", "once_then_default")
+TRANSITION_MODES = ("default", "none", "custom")
 MAX_ITEMS = 500
 
 
@@ -39,21 +47,55 @@ def get_playlist_row(conn, pid):
 
 def playlist_items(conn, pid):
     return conn.execute(
-        "SELECT pi.id AS item_id, pi.position, pi.duration AS item_duration, m.* "
+        "SELECT pi.id AS item_id, pi.position, pi.duration AS item_duration, pi.scale_mode AS item_scale_mode, "
+        "pi.transition_mode AS item_transition_mode, pi.transition_media_id AS item_transition_media_id, m.* "
         "FROM playlist_items pi JOIN media m ON m.id = pi.media_id "
         "WHERE pi.playlist_id = ? ORDER BY pi.position", (pid,)).fetchall()
 
 
+def resolve_transition_id(pl_row, item):
+    """Media-id van de overgang ná dit item, of None."""
+    if not pl_row["transition_enabled"]:
+        return None
+    mode = item["item_transition_mode"]
+    if mode == "none":
+        return None
+    if mode == "custom":
+        return item["item_transition_media_id"]
+    return pl_row["transition_media_id"]
+
+
 def playlist_problems(conn, cfg, pid):
-    """Lijst met redenen waarom de playlist niet geactiveerd kan worden."""
+    """Redenen waarom de playlist niet geactiveerd kan worden (blokkerend)."""
     problems = []
     items = playlist_items(conn, pid)
     if not items:
         problems.append("De playlist is leeg.")
     for it in items:
-        if not os.path.exists(media.media_paths(cfg, it)["playback"]):
+        if not media.playback_available(cfg, it):
             problems.append(f"Bestand ontbreekt op de opslag: {it['name']}")
     return problems
+
+
+def playlist_warnings(conn, cfg, pl_row):
+    """Niet-blokkerende meldingen (een ontbrekende overgang wordt overgeslagen)."""
+    warnings = []
+    if not pl_row["transition_enabled"]:
+        return warnings
+    ids = set()
+    if pl_row["transition_media_id"]:
+        ids.add(pl_row["transition_media_id"])
+    else:
+        if any(it["item_transition_mode"] == "default" for it in playlist_items(conn, pl_row["id"])):
+            warnings.append("Overgangen staan aan, maar er is geen standaardovergang gekozen.")
+    for it in playlist_items(conn, pl_row["id"]):
+        if it["item_transition_mode"] == "custom" and it["item_transition_media_id"]:
+            ids.add(it["item_transition_media_id"])
+    for mid in ids:
+        row = conn.execute("SELECT * FROM media WHERE id = ?", (mid,)).fetchone()
+        if row is None or not media.playback_available(cfg, row):
+            warnings.append("Een overgangsvideo ontbreekt; die overgang wordt overgeslagen.")
+    return warnings
 
 
 def _assignment_info(conn):
@@ -67,14 +109,23 @@ def _assignment_info(conn):
     return default_id, assigned
 
 
+def _item_seconds(it, settings):
+    if it["kind"] == "video":
+        return it["duration"] or 0
+    return it["item_duration"] or settings["default_image_duration"]
+
+
 def _summary(conn, cfg, row, default_id, assigned, settings):
     items = playlist_items(conn, row["id"])
-    total = 0.0
+    total = sum(_item_seconds(it, settings) for it in items)
+    durations = {}
     for it in items:
-        if it["kind"] == "image":
-            total += it["item_duration"] or settings["default_image_duration"]
-        else:
-            total += it["duration"] or 0
+        tid = resolve_transition_id(row, it)
+        if tid:
+            if tid not in durations:
+                t = conn.execute("SELECT duration FROM media WHERE id = ?", (tid,)).fetchone()
+                durations[tid] = (t["duration"] or 0) if t else 0
+            total += durations[tid]
     return {
         "id": row["id"], "name": row["name"], "repeat_mode": row["repeat_mode"], "mute": bool(row["mute"]),
         "item_count": len(items), "total_duration": round(total, 1),
@@ -82,7 +133,17 @@ def _summary(conn, cfg, row, default_id, assigned, settings):
         "thumbs": [it["id"] for it in items[:4]],
         "valid": not playlist_problems(conn, cfg, row["id"]),
         "updated_at": row["updated_at"],
+        "transition_enabled": bool(row["transition_enabled"]),
+        "transition_media_id": row["transition_media_id"],
+        "new_item_transition": row["new_item_transition"],
     }
+
+
+def _media_json(conn, cfg, media_id):
+    if not media_id:
+        return None
+    row = conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+    return media_row_to_json(cfg, row) if row else None
 
 
 def register(app):
@@ -117,11 +178,29 @@ def register(app):
         items = []
         for it in playlist_items(conn, row["id"]):
             m = media_row_to_json(cfg, it)
-            items.append({"item_id": it["item_id"], "duration": it["item_duration"], "media": m})
+            items.append({
+                "item_id": it["item_id"], "duration": it["item_duration"], "media": m,
+                "scale_mode": it["item_scale_mode"],
+                "transition_mode": it["item_transition_mode"],
+                "transition_media_id": it["item_transition_media_id"],
+                "transition_media": _media_json(conn, cfg, it["item_transition_media_id"]),
+            })
         out = _summary(conn, cfg, row, default_id, assigned, settings)
         out["items"] = items
+        out["transition_media"] = _media_json(conn, cfg, row["transition_media_id"])
         out["problems"] = playlist_problems(conn, cfg, row["id"])
+        out["warnings"] = playlist_warnings(conn, cfg, row)
         return jsonify(playlist=out)
+
+    def _video_id(conn, mid, what):
+        if mid in (None, ""):
+            return None
+        r = conn.execute("SELECT kind FROM media WHERE id = ?", (str(mid),)).fetchone()
+        if r is None:
+            raise ApiError(400, f"{what}: onbekende video.")
+        if r["kind"] != "video":
+            raise ApiError(400, f"{what}: kies een videobestand als overgang.")
+        return str(mid)
 
     @app.put("/api/playlists/<pid>")
     def playlists_update(pid):
@@ -133,18 +212,24 @@ def register(app):
         if repeat_mode not in REPEAT_MODES:
             raise ApiError(400, "Ongeldige herhaalinstelling.")
         mute = 1 if data.get("mute", bool(row["mute"])) else 0
+        t_enabled = 1 if data.get("transition_enabled", bool(row["transition_enabled"])) else 0
+        t_media = _video_id(conn, data.get("transition_media_id", row["transition_media_id"]), "Standaardovergang")
+        new_item_t = data.get("new_item_transition", row["new_item_transition"])
+        if new_item_t not in ("default", "none"):
+            raise ApiError(400, "Ongeldige standaardinstelling voor nieuwe items.")
         items = data.get("items")
         clean_items = None
         if items is not None:
             if not isinstance(items, list) or len(items) > MAX_ITEMS:
                 raise ApiError(400, f"Items moeten een lijst zijn (maximaal {MAX_ITEMS}).")
-            ids = {r["id"]: r["kind"] for r in conn.execute("SELECT id, kind FROM media")}
+            kinds = {r["id"]: r["kind"] for r in conn.execute("SELECT id, kind FROM media")}
             clean_items = []
             for i, it in enumerate(items):
-                if not isinstance(it, dict) or it.get("media_id") not in ids:
+                if not isinstance(it, dict) or it.get("media_id") not in kinds:
                     raise ApiError(400, f"Item {i + 1} verwijst naar onbekende media.")
+                kind = kinds[it["media_id"]]
                 dur = it.get("duration")
-                if dur in ("", None) or ids[it["media_id"]] == "video":
+                if dur in ("", None) or kind == "video":
                     dur = None
                 else:
                     try:
@@ -153,22 +238,36 @@ def register(app):
                         raise ApiError(400, f"Item {i + 1}: ongeldige duur.")
                     if not (1 <= dur <= 86400):
                         raise ApiError(400, f"Item {i + 1}: duur moet tussen 1 en 86400 seconden liggen.")
-                clean_items.append((it["media_id"], dur))
+                scale = it.get("scale_mode") or None
+                if scale is not None and scale not in db.SCALE_MODES:
+                    raise ApiError(400, f"Item {i + 1}: ongeldige schaalmodus.")
+                tmode = it.get("transition_mode") or "default"
+                if tmode not in TRANSITION_MODES:
+                    raise ApiError(400, f"Item {i + 1}: ongeldige overganginstelling.")
+                tmid = None
+                if tmode == "custom":
+                    tmid = _video_id(conn, it.get("transition_media_id"), f"Item {i + 1}")
+                    if tmid is None:
+                        raise ApiError(400, f"Item {i + 1}: kies een overgangsvideo of 'standaard'.")
+                clean_items.append((it["media_id"], dur, scale, tmode, tmid))
             if not clean_items:
-                cfg = state().cfg
-                default_id, assigned = _assignment_info(conn)
+                _default_id, assigned = _assignment_info(conn)
                 if row["id"] in assigned:
                     raise ApiError(422, "Deze playlist is actief op een scherm en mag niet leeg worden. "
                                         "Activeer eerst een andere playlist.")
         try:
             with db.Tx(conn):
-                conn.execute("UPDATE playlists SET name = ?, repeat_mode = ?, mute = ?, updated_at = ? WHERE id = ?",
-                             (name, repeat_mode, mute, db.now(), row["id"]))
+                conn.execute(
+                    "UPDATE playlists SET name = ?, repeat_mode = ?, mute = ?, updated_at = ?, "
+                    "transition_enabled = ?, transition_media_id = ?, new_item_transition = ? WHERE id = ?",
+                    (name, repeat_mode, mute, db.now(), t_enabled, t_media, new_item_t, row["id"]))
                 if clean_items is not None:
                     conn.execute("DELETE FROM playlist_items WHERE playlist_id = ?", (row["id"],))
                     conn.executemany(
-                        "INSERT INTO playlist_items (playlist_id, media_id, position, duration) VALUES (?, ?, ?, ?)",
-                        [(row["id"], mid, pos, dur) for pos, (mid, dur) in enumerate(clean_items)])
+                        "INSERT INTO playlist_items (playlist_id, media_id, position, duration, scale_mode, "
+                        "transition_mode, transition_media_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        [(row["id"], mid, pos, dur, sc, tm, tmid)
+                         for pos, (mid, dur, sc, tm, tmid) in enumerate(clean_items)])
         except sqlite3.IntegrityError:
             raise ApiError(409, "Er bestaat al een playlist met deze naam.")
         log.info("Playlist '%s' opgeslagen.", name)
@@ -206,4 +305,4 @@ def register(app):
             if cur.rowcount == 0:
                 raise ApiError(404, "Player niet gevonden.")
         log.info("Playlist '%s' geactiveerd (%s).", row["name"], target)
-        return jsonify(ok=True)
+        return jsonify(ok=True, warnings=playlist_warnings(conn, cfg, row))

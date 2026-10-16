@@ -88,7 +88,7 @@ def write_cache(cache_dir, items, standby=None, **extra):
     os.makedirs(cache_dir, exist_ok=True)
     cfg = {"revision": "test", "playlist": {"id": 1, "name": "T", "repeat_mode": "loop", "mute": False},
            "items": items, "fallback_items": [], "volume": 50, "player": {"id": "local", "rotation": 0},
-           "standby": {"local": standby}}
+           "standby": {"local": standby}, "transitions": {}, "scale_default": "cover"}
     cfg.update(extra)
     with open(os.path.join(cache_dir, "last-config.json"), "w") as fh:
         json.dump(cfg, fh)
@@ -299,3 +299,58 @@ def test_remote_player_downloads_media(live_server, media_files, tmp_path):
     assert local.startswith(remote_cache) and os.path.getsize(local) == got["items"][0]["size"]
     assert got["standby"]["local"].startswith(remote_cache)
     assert os.path.exists(os.path.join(remote_cache, "last-config.json"))
+
+
+# -- 1.1: overgangen, schaalmodi en HTML in de mpv-weergave -------------------------------
+
+def test_mpv_transitions_between_items(tmp_path, fake_log):
+    _ini, player_ini = make_config(tmp_path, port=free_port())
+    a, b = img(tmp_path, "a.png"), img(tmp_path, "b.png")
+    t = tmp_path / "overgang.mp4"
+    t.write_bytes(b"x")
+    write_cache(str(tmp_path / "player-cache"), [
+        {"media_id": "1", "name": "a", "kind": "image", "local": a, "duration": 0.5, "transition": "T", "scale": "cover"},
+        {"media_id": "2", "name": "b", "kind": "image", "local": b, "duration": 0.5, "transition": "T", "scale": "contain"},
+    ], transitions={"T": {"media_id": "T", "name": "overgang", "local": str(t), "video_duration": 1.0}})
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: len(loads(fake_log)) >= 6, timeout=25)
+        assert loads(fake_log)[:6] == ["a.png", "overgang.mp4", "b.png", "overgang.mp4", "a.png", "overgang.mp4"]
+        states = [s for _t, s, _n in pt.player.history if s in ("PLAYING", "PLAYING_TRANSITION")]
+        for x, y in zip(states, states[1:]):
+            assert not (x == y == "PLAYING_TRANSITION")
+        log = read_log(fake_log)
+        assert "set panscan=1.0" in log and "set panscan=0.0" in log   # cover en contain
+    finally:
+        pt.stop()
+
+
+def test_mpv_missing_transition_and_html_are_skipped(tmp_path, fake_log):
+    _ini, player_ini = make_config(tmp_path, port=free_port())
+    a = img(tmp_path, "a.png")
+    write_cache(str(tmp_path / "player-cache"), [
+        {"media_id": "1", "name": "a", "kind": "image", "local": a, "duration": 0.5, "transition": "T"},
+        {"media_id": "2", "name": "pagina", "kind": "html", "local": None, "duration": 5,
+         "html": {"source": "builtin", "page": "clock"}},
+    ], transitions={"T": {"media_id": "T", "name": "weg", "local": str(tmp_path / "weg.mp4"), "video_duration": 1}})
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: loads(fake_log).count("a.png") >= 3, timeout=20)
+        assert "weg.mp4" not in loads(fake_log)
+        errs = " ".join(pt.player.errors)
+        assert "browserweergave" in errs and "weg" in errs
+        assert sum("browserweergave" in e for e in pt.player.errors) == 1, "melding maar één keer"
+    finally:
+        pt.stop()
+
+
+def test_mpv_fill_mode_sets_keepaspect(tmp_path, fake_log):
+    _ini, player_ini = make_config(tmp_path, port=free_port())
+    a = img(tmp_path, "a.png")
+    write_cache(str(tmp_path / "player-cache"), [
+        {"media_id": "1", "name": "a", "kind": "image", "local": a, "duration": 5, "scale": "fill"}])
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: "set keepaspect=False" in read_log(fake_log), timeout=10)
+    finally:
+        pt.stop()

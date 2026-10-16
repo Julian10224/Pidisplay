@@ -1,6 +1,11 @@
-"""API: mediabeheer (upload, lijst, hernoemen, verwijderen, bestanden serveren)."""
+"""API: mediabeheer (upload, lijst, hernoemen, verwijderen, bestanden serveren).
+
+Sinds 1.1 ook HTML: geüploade HTML-bestanden/ZIP-projecten en ingebouwde lokale pagina's
+(whitelist in htmlpkg.BUILTIN_PAGES).
+"""
 
 import hashlib
+import hmac
 import logging
 import os
 import re
@@ -9,34 +14,66 @@ import threading
 import uuid
 from urllib.parse import unquote
 
-from flask import jsonify, request, send_file
+from flask import current_app, jsonify, request, send_file, send_from_directory
 
-from . import db, media
+from . import db, htmlpkg, media
 from .app import ApiError, body, get_db, state
 
 log = logging.getLogger("signage.media")
 
 ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _processing = threading.Semaphore(1)   # één zware verwerking tegelijk (1 GB RAM)
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
+def preview_token(media_id):
+    key = current_app.secret_key
+    return hmac.new(key, ("preview:" + media_id).encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def media_row_to_json(cfg, row, usage=None):
     paths = media.media_paths(cfg, row)
     out = {k: row[k] for k in ("id", "name", "original_filename", "kind", "format", "ext", "size",
                                 "width", "height", "duration", "codec", "status", "warning", "created_at")}
-    out["missing"] = not os.path.exists(paths["playback"])
+    out["missing"] = not media.playback_available(cfg, row)
     out["has_thumb"] = bool(paths["thumb"] and os.path.exists(paths["thumb"]))
+    if row["kind"] == "html":
+        out["html_source"] = "builtin" if row["playback_dir"] == "builtin" else "upload"
+        out["html_entry"] = row["html_entry"]
+        out["html_width"] = row["html_width"]
+        out["html_height"] = row["html_height"]
+        if row["playback_dir"] == "builtin":
+            page = htmlpkg.BUILTIN_PAGES.get(row["playback_name"], {})
+            out["builtin_page"] = row["playback_name"]
+            out["preview_url"] = f"/display/{page.get('file', '')}"
+        else:
+            out["preview_url"] = f"/preview/{row['id']}/{preview_token(row['id'])}/{row['html_entry']}"
     if usage is not None:
         out["playlists"] = usage.get(row["id"], [])
     return out
 
 
 def usage_map(conn):
+    """media_id -> lijst van playlists waarin het als item of als overgang voorkomt."""
     usage = {}
-    for r in conn.execute(
-            "SELECT DISTINCT pi.media_id, p.id, p.name FROM playlist_items pi "
-            "JOIN playlists p ON p.id = pi.playlist_id ORDER BY p.name"):
-        usage.setdefault(r["media_id"], []).append({"id": r["id"], "name": r["name"]})
+
+    def add(mid, pid, name, role):
+        lst = usage.setdefault(mid, [])
+        for e in lst:
+            if e["id"] == pid:
+                if role not in e["roles"]:
+                    e["roles"].append(role)
+                return
+        lst.append({"id": pid, "name": name, "roles": [role]})
+
+    for r in conn.execute("SELECT DISTINCT pi.media_id, p.id, p.name FROM playlist_items pi "
+                          "JOIN playlists p ON p.id = pi.playlist_id ORDER BY p.name"):
+        add(r["media_id"], r["id"], r["name"], "item")
+    for r in conn.execute("SELECT DISTINCT pi.transition_media_id AS mid, p.id, p.name FROM playlist_items pi "
+                          "JOIN playlists p ON p.id = pi.playlist_id WHERE pi.transition_media_id IS NOT NULL "
+                          "UNION SELECT transition_media_id, id, name FROM playlists "
+                          "WHERE transition_media_id IS NOT NULL"):
+        add(r["mid"], r["id"], r["name"], "transition")
     return usage
 
 
@@ -47,6 +84,26 @@ def get_media_row(conn, media_id):
     if row is None:
         raise ApiError(404, "Media niet gevonden.")
     return row
+
+
+def _remove_paths(paths):
+    for p in paths:
+        if not p:
+            continue
+        try:
+            if os.path.isdir(p):
+                shutil.rmtree(p)
+            else:
+                os.unlink(p)
+        except FileNotFoundError:
+            pass
+
+
+INSERT_SQL = (
+    "INSERT INTO media (id, name, original_filename, kind, format, ext, size, sha256, width, "
+    "height, duration, codec, status, warning, file_name, playback_name, playback_dir, "
+    "playback_sha256, playback_size, thumb_name, created_at, html_entry) VALUES "
+    "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 
 
 def register(app):
@@ -62,7 +119,8 @@ def register(app):
             media=[media_row_to_json(cfg, r, usage) for r in rows],
             limits={"max_upload_bytes": cfg.max_upload_bytes, "free_bytes": du.free,
                     "min_free_bytes": cfg.min_free_bytes,
-                    "allowed": sorted(media.ALLOWED_EXTS)})
+                    "allowed": sorted(media.ALLOWED_EXTS)},
+            builtin_pages=[{"id": k, **v} for k, v in htmlpkg.BUILTIN_PAGES.items()])
 
     @app.post("/api/media/upload")
     def media_upload():
@@ -72,7 +130,7 @@ def register(app):
         ext = media.file_ext(original)
         if not original or ext not in media.ALLOWED_EXTS:
             raise ApiError(415, f"Bestandstype '{ext or 'onbekend'}' wordt niet ondersteund. "
-                                "Toegestaan: PNG, JPEG, WebP, MP4, M4V, MOV, MKV, WebM.")
+                                "Toegestaan: PNG, JPEG, WebP, MP4, M4V, MOV, MKV, WebM, HTML en ZIP (HTML-project).")
         length = request.content_length
         if length is None:
             raise ApiError(411, "Content-Length ontbreekt.")
@@ -82,7 +140,8 @@ def register(app):
             raise ApiError(413, f"Bestand is groter dan de maximale uploadgrootte "
                                 f"({cfg.max_upload_bytes // (1024 * 1024)} MB).")
         free = shutil.disk_usage(cfg.media_dir).free
-        if free - int(length * 1.1) < cfg.min_free_bytes:
+        factor = 3 if ext == ".zip" else 1.1   # ZIP wordt ook uitgepakt
+        if free - int(length * factor) < cfg.min_free_bytes:
             raise ApiError(507, "Onvoldoende vrije opslagruimte voor dit bestand.")
 
         media_id = uuid.uuid4().hex
@@ -107,7 +166,7 @@ def register(app):
 
             conn = get_db()
             dup = conn.execute("SELECT * FROM media WHERE sha256 = ?", (sha,)).fetchone()
-            if dup is not None and os.path.exists(media.media_paths(cfg, dup)["playback"]):
+            if dup is not None and media.playback_available(cfg, dup):
                 os.unlink(part)
                 return jsonify(media=media_row_to_json(cfg, dup, usage_map(conn)), duplicate=True)
 
@@ -118,22 +177,14 @@ def register(app):
                     raise ApiError(422, str(exc))
             created = info.pop("_created")
             try:
-                conn.execute(
-                    "INSERT INTO media (id, name, original_filename, kind, format, ext, size, sha256, width, "
-                    "height, duration, codec, status, warning, file_name, playback_name, playback_dir, "
-                    "playback_sha256, playback_size, thumb_name, created_at) VALUES "
-                    "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (media_id, media.safe_display_name(original), os.path.basename(original), info["kind"],
-                     info["format"], info["ext"], received, sha, info["width"], info["height"],
-                     info["duration"], info["codec"], info["status"], info["warning"], info["file_name"],
-                     info["playback_name"], info["playback_dir"], info["playback_sha256"],
-                     info["playback_size"], info["thumb_name"], db.now()))
+                conn.execute(INSERT_SQL, (
+                    media_id, media.safe_display_name(original), os.path.basename(original.replace("\\", "/")),
+                    info["kind"], info["format"], info["ext"], received, sha, info["width"], info["height"],
+                    info["duration"], info["codec"], info["status"], info["warning"], info["file_name"],
+                    info["playback_name"], info["playback_dir"], info["playback_sha256"],
+                    info["playback_size"], info["thumb_name"], db.now(), info.get("html_entry")))
             except Exception:
-                for p in created:
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
+                _remove_paths(created)
                 raise
             log.info("Media geüpload: %s (%s, %d bytes)", original, info["kind"], received)
             row = get_media_row(conn, media_id)
@@ -145,14 +196,46 @@ def register(app):
                 except OSError:
                     pass
 
-    @app.patch("/api/media/<media_id>")
-    def media_rename(media_id):
+    @app.post("/api/media/builtin")
+    def media_add_builtin():
+        page = str(body().get("page", ""))
+        spec = htmlpkg.BUILTIN_PAGES.get(page)
+        if spec is None:
+            raise ApiError(400, "Onbekende lokale pagina.")
+        media_id = uuid.uuid4().hex
         conn = get_db()
-        get_media_row(conn, media_id)
-        name = re.sub(r"[\x00-\x1f\x7f]", "", str(body().get("name", ""))).strip()[:120]
-        if not name:
-            raise ApiError(400, "Naam mag niet leeg zijn.")
-        conn.execute("UPDATE media SET name = ? WHERE id = ?", (name, media_id))
+        conn.execute(INSERT_SQL, (
+            media_id, spec["name"], spec["file"], "html", "builtin", "", 0, f"builtin-{page}-{media_id}",
+            None, None, None, None, "ok", None, "", page, "builtin", f"builtin-{page}", 0, None, db.now(),
+            spec["file"]))
+        return jsonify(media=media_row_to_json(state().cfg, get_media_row(conn, media_id), {})), 201
+
+    @app.patch("/api/media/<media_id>")
+    def media_update(media_id):
+        conn = get_db()
+        row = get_media_row(conn, media_id)
+        data = body()
+        name = row["name"]
+        if "name" in data:
+            name = re.sub(r"[\x00-\x1f\x7f]", "", str(data.get("name", ""))).strip()[:120]
+            if not name:
+                raise ApiError(400, "Naam mag niet leeg zijn.")
+        hw, hh = row["html_width"], row["html_height"]
+        if "html_width" in data or "html_height" in data:
+            if row["kind"] != "html":
+                raise ApiError(400, "Een ontwerpformaat kan alleen bij HTML worden ingesteld.")
+            w, h = data.get("html_width"), data.get("html_height")
+            if w in (None, "", 0) or h in (None, "", 0):
+                hw = hh = None
+            else:
+                try:
+                    hw, hh = int(w), int(h)
+                except (TypeError, ValueError):
+                    raise ApiError(400, "Ongeldig ontwerpformaat.")
+                if not (100 <= hw <= 7680 and 100 <= hh <= 7680):
+                    raise ApiError(400, "Ontwerpformaat moet tussen 100 en 7680 pixels liggen.")
+        conn.execute("UPDATE media SET name = ?, html_width = ?, html_height = ? WHERE id = ?",
+                     (name, hw, hh, media_id))
         return jsonify(media=media_row_to_json(state().cfg, get_media_row(conn, media_id), usage_map(conn)))
 
     @app.delete("/api/media/<media_id>")
@@ -169,16 +252,16 @@ def register(app):
                            playlists=used, in_active=any(p["id"] in active for p in used))
         with db.Tx(conn):
             conn.execute("DELETE FROM playlist_items WHERE media_id = ?", (media_id,))
+            conn.execute("UPDATE playlist_items SET transition_media_id = NULL, transition_mode = "
+                         "CASE WHEN transition_mode = 'custom' THEN 'default' ELSE transition_mode END "
+                         "WHERE transition_media_id = ?", (media_id,))
+            conn.execute("UPDATE playlists SET transition_media_id = NULL WHERE transition_media_id = ?",
+                         (media_id,))
             for p in used:
                 conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (db.now(), p["id"]))
             conn.execute("DELETE FROM media WHERE id = ?", (media_id,))
         paths = media.media_paths(cfg, row)
-        for p in {paths["file"], paths["playback"], paths["thumb"]}:
-            if p:
-                try:
-                    os.unlink(p)
-                except FileNotFoundError:
-                    pass
+        _remove_paths({paths["file"], paths["playback"], paths["thumb"]})
         log.info("Media verwijderd: %s", row["name"])
         return jsonify(ok=True, removed_from=used)
 
@@ -187,10 +270,12 @@ def register(app):
         row = get_media_row(get_db(), media_id)
         paths = media.media_paths(cfg, row)
         path = paths[which]
-        if not path or not os.path.exists(path):
+        if not path or not os.path.isfile(path):
             raise ApiError(404, "Bestand ontbreekt op de opslag.")
         ext = os.path.splitext(path)[1].lower()
         mimetype = media.MIME_TYPES.get(ext, "application/octet-stream")
+        if as_attachment:
+            mimetype = "application/octet-stream" if row["kind"] == "html" else mimetype
         resp = send_file(path, mimetype=mimetype, conditional=True, as_attachment=as_attachment,
                          download_name=(row["name"] + row["ext"]) if as_attachment else None,
                          max_age=0 if which != "thumb" else 3600)
@@ -207,3 +292,30 @@ def register(app):
     @app.get("/api/media/<media_id>/download")
     def media_download(media_id):
         return _serve(media_id, "file", as_attachment=True)
+
+    # -- HTML-voorvertoning ----------------------------------------------------
+    # Geleverd buiten /api met een capability-token in het pad en een CSP-sandbox, zodat
+    # geüploade scripts geen toegang hebben tot de beheeromgeving (eigen, ondoorzichtige origin).
+    @app.get("/preview/<media_id>/<token>/<path:rel>")
+    def html_preview(media_id, token, rel):
+        if not ID_RE.match(media_id) or not hmac.compare_digest(token, preview_token(media_id)):
+            raise ApiError(404, "Niet gevonden.")
+        cfg = state().cfg
+        row = get_db().execute("SELECT * FROM media WHERE id = ? AND kind = 'html'", (media_id,)).fetchone()
+        if row is None or row["playback_dir"] != "html":
+            raise ApiError(404, "Niet gevonden.")
+        root = os.path.join(cfg.html_dir, row["playback_name"])
+        full = htmlpkg.safe_join(root, rel)
+        if not full or not os.path.isfile(full):
+            raise ApiError(404, "Niet gevonden.")
+        resp = send_file(full, conditional=True, max_age=0)
+        resp.headers["Content-Security-Policy"] = "sandbox allow-scripts allow-forms allow-popups"
+        resp.headers["X-Frame-Options"] = "SAMEORIGIN"
+        return resp
+
+    @app.get("/display/<path:fname>")
+    def display_page(fname):
+        allowed = {spec["file"] for spec in htmlpkg.BUILTIN_PAGES.values()} | {"display.css"}
+        if fname not in allowed:
+            raise ApiError(404, "Niet gevonden.")
+        return send_from_directory(os.path.join(STATIC_DIR, "display"), fname, max_age=300)

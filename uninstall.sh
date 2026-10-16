@@ -19,7 +19,7 @@ for u in signage-player.service signage-server.service signage-backup.timer sign
     rm -f "/etc/systemd/system/$u"
 done
 systemctl daemon-reload
-rm -f /etc/sudoers.d/signage /usr/local/sbin/signage-priv /usr/local/bin/signage-admin
+rm -f /etc/sudoers.d/signage /usr/local/sbin/signage-priv /usr/local/bin/signage-admin /etc/pam.d/signage-player
 rm -f /etc/systemd/journald.conf.d/signage.conf /etc/systemd/system.conf.d/signage-watchdog.conf
 rm -rf /opt/signage
 echo "Software en services verwijderd."

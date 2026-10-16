@@ -1,0 +1,5 @@
+# PAM-configuratie voor signage-player.service: maakt een logind-sessie op tty1 zodat
+# de compositor (cage) het scherm mag gebruiken. Er wordt niet met een wachtwoord ingelogd.
+account  required pam_unix.so
+session  required pam_unix.so
+session  required pam_systemd.so

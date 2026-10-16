@@ -1,28 +1,43 @@
 [Unit]
 Description=Signage-player (afspelen op het HDMI-scherm)
 Documentation=file:///opt/signage/current/README.md
-After=signage-server.service systemd-user-sessions.service
+After=signage-server.service systemd-user-sessions.service plymouth-quit-wait.service getty@tty1.service
 Wants=signage-server.service
+# De player neemt de eerste console (tty1) over; inloggen op het scherm kan via Ctrl+Alt+F2.
+Conflicts=getty@tty1.service
 StartLimitIntervalSec=600
 StartLimitBurst=10
 
 [Service]
 Type=notify
-NotifyAccess=main
+# De daemon draait als kindproces van cage en meldt zich zelf bij systemd.
+NotifyAccess=all
 User=signage
 Group=signage
+# Eigen sessie op tty1 via logind, nodig voor de compositor (cage) en het scherm.
+PAMName=signage-player
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
 Environment=PYTHONPATH=/opt/signage/current/app
 Environment=SIGNAGE_PLAYER_CONFIG=/etc/signage/player.ini
 Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/var/lib/signage/player
 Environment=XDG_RUNTIME_DIR=/run/signage-player
 RuntimeDirectory=signage-player
-ExecStart=/usr/bin/python3 -m signage.player.daemon
-# De daemon meldt zich elke 0,2 s; blijft dat 60 s uit, dan herstart systemd de player.
+RuntimeDirectoryMode=0700
+ExecStart=/opt/signage/current/bin/signage-player-launch
+# De daemon meldt zich elke halve seconde; blijft dat 60 s uit, dan herstart systemd de player.
 WatchdogSec=60
 Restart=always
 RestartSec=5
-TimeoutStopSec=15
-NoNewPrivileges=yes
+TimeoutStopSec=20
 ProtectSystem=full
 ProtectHome=yes
 PrivateTmp=yes

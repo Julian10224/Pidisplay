@@ -76,11 +76,13 @@ def test_upload_images(client, media_files):
     r = upload(client, media_files["jpg"])
     assert r.status_code == 201, r.json
     m = r.json["media"]
-    # afspeelversie: EXIF-rotatie toegepast en binnen 1920x1080
+    # afspeelversie (1.1): EXIF-rotatie toegepast, groot genoeg om 1920x1080 beeldvullend te
+    # bedekken, maar nooit groter dan 2048 px per zijde (GPU-limiet Pi 3).
     rend = os.path.join(client.cfg.renditions_dir, m["id"] + ".jpg")
     with Image.open(rend) as img:
-        assert img.size[0] <= 1920 and img.size[1] <= 1080
+        assert max(img.size) <= 2048
         assert img.size[1] > img.size[0], "portret na EXIF-rotatie"
+        assert img.size == (1536, 2048)   # 3000x4000 -> cover 1920 breed, begrensd op 2048
 
     r = upload(client, media_files["webp"])
     assert r.status_code == 201, r.json

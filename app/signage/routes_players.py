@@ -34,20 +34,55 @@ def active_playlist_ids(conn):
     return {effective_playlist_id(conn, r, settings) for r in conn.execute("SELECT * FROM players")} - {None}
 
 
-def _items_payload(conn, cfg, pid, settings):
+def _file_entry(cfg, row):
+    paths = media.media_paths(cfg, row)
+    return {
+        "path": paths["playback"], "url": f"/api/player/v1/media/{row['id']}",
+        "sha256": row["playback_sha256"], "size": row["playback_size"],
+        "ext": os.path.splitext(paths["playback"])[1].lower(),
+    }
+
+
+def _html_entry(cfg, row):
+    if row["playback_dir"] == "builtin":
+        return {"source": "builtin", "page": row["playback_name"], "file": row["html_entry"],
+                "width": row["html_width"], "height": row["html_height"]}
+    paths = media.media_paths(cfg, row)
+    return {"source": "upload", "entry": row["html_entry"] or "index.html", "path": paths["playback"],
+            "url": f"/api/player/v1/media/{row['id']}", "sha256": row["playback_sha256"],
+            "size": row["playback_size"], "ext": row["ext"],
+            "width": row["html_width"], "height": row["html_height"]}
+
+
+def _items_payload(conn, cfg, pl_row, settings, transitions):
+    from .routes_playlists import resolve_transition_id
     out = []
-    for it in playlist_items(conn, pid):
-        paths = media.media_paths(cfg, it)
-        if not os.path.exists(paths["playback"]):
+    for it in playlist_items(conn, pl_row["id"]):
+        if not media.playback_available(cfg, it):
             continue  # ontbrekende bestanden worden nooit naar de player gestuurd
-        out.append({
+        entry = {
             "media_id": it["id"], "name": it["name"], "kind": it["kind"],
-            "path": paths["playback"], "url": f"/api/player/v1/media/{it['id']}",
-            "sha256": it["playback_sha256"], "size": it["playback_size"],
-            "ext": os.path.splitext(paths["playback"])[1].lower(),
-            "duration": (it["item_duration"] or settings["default_image_duration"]) if it["kind"] == "image" else None,
+            "scale": it["item_scale_mode"] or settings.get("scale_mode", "cover"),
+            "duration": None if it["kind"] == "video" else (it["item_duration"] or settings["default_image_duration"]),
             "video_duration": it["duration"] if it["kind"] == "video" else None,
-        })
+            "transition": None,
+        }
+        if it["kind"] == "html":
+            entry["html"] = _html_entry(cfg, it)
+        else:
+            entry.update(_file_entry(cfg, it))
+        tid = resolve_transition_id(pl_row, it)
+        if tid:
+            if tid not in transitions:
+                trow = conn.execute("SELECT * FROM media WHERE id = ? AND kind = 'video'", (tid,)).fetchone()
+                if trow is not None and media.playback_available(cfg, trow):
+                    transitions[tid] = {"media_id": tid, "name": trow["name"], "kind": "video",
+                                        "video_duration": trow["duration"], **_file_entry(cfg, trow)}
+                else:
+                    transitions[tid] = None   # ontbreekt: overgang wordt overgeslagen
+            if transitions[tid]:
+                entry["transition"] = tid
+        out.append(entry)
     return out
 
 
@@ -58,15 +93,18 @@ def build_player_config(conn, cfg, player_row):
     playlist = None
     items = []
     fallback = []
+    transitions = {}
     if pid is not None:
         row = conn.execute("SELECT * FROM playlists WHERE id = ?", (pid,)).fetchone()
         if row is not None:
             playlist = {"id": row["id"], "name": row["name"], "repeat_mode": row["repeat_mode"],
                         "mute": bool(row["mute"])}
-            items = _items_payload(conn, cfg, row["id"], settings)
+            items = _items_payload(conn, cfg, row, settings, transitions)
             default_id = settings.get("default_playlist_id")
             if row["repeat_mode"] == "once_then_default" and default_id and default_id != row["id"]:
-                fallback = _items_payload(conn, cfg, default_id, settings)
+                drow = conn.execute("SELECT * FROM playlists WHERE id = ?", (default_id,)).fetchone()
+                if drow is not None:
+                    fallback = _items_payload(conn, cfg, drow, settings, transitions)
     if st.standby_sha is None or not os.path.exists(cfg.standby_path):
         refresh_standby(st, force=True)
     payload = {
@@ -75,6 +113,8 @@ def build_player_config(conn, cfg, player_row):
         "playlist": playlist,
         "items": items,
         "fallback_items": fallback,
+        "transitions": {k: v for k, v in transitions.items() if v},
+        "scale_default": settings.get("scale_mode", "cover"),
         "volume": int(settings.get("volume", 80)),
         "standby": {"path": cfg.standby_path, "url": "/api/player/v1/standby", "sha256": st.standby_sha},
     }
@@ -226,7 +266,8 @@ def register(app):
         if not isinstance(data, dict):
             raise ApiError(400, "Verwacht JSON.")
         allowed = ("state", "current", "playlist_id", "revision", "mpv_restarts", "errors", "display",
-                   "version", "uptime", "message")
+                   "version", "uptime", "message", "renderer", "phase", "video_stats", "viewport", "hwdec",
+                   "renderer_note")
         status = {k: data.get(k) for k in allowed if k in data}
         if isinstance(status.get("errors"), list):
             status["errors"] = [str(e)[:300] for e in status["errors"][-10:]]
@@ -250,10 +291,12 @@ def register(app):
         if not re.match(r"^[0-9a-f]{32}$", media_id):
             raise ApiError(404, "Niet gevonden.")
         row = conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
-        if row is None:
+        if row is None or row["playback_dir"] == "builtin":
             raise ApiError(404, "Niet gevonden.")
-        path = media.media_paths(cfg, row)["playback"]
-        if not os.path.exists(path):
+        paths = media.media_paths(cfg, row)
+        # Voor HTML-projecten krijgt een externe player het originele .html/.zip-bestand.
+        path = paths["file"] if row["playback_dir"] == "html" else paths["playback"]
+        if not path or not os.path.isfile(path):
             raise ApiError(404, "Bestand ontbreekt.")
         return send_file(path, mimetype="application/octet-stream", conditional=True, max_age=0)
 

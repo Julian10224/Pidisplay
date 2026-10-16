@@ -196,6 +196,8 @@ class Mpv:
         return self.command("set_property", prop, value)
 
     def drain_events(self, wait=0.0):
+        if not self.alive():
+            raise MpvError("mpv draait niet.")
         try:
             for msg in self._read_lines(wait):
                 if "event" in msg:

@@ -26,7 +26,7 @@ import time
 
 from . import __version__
 
-NAME_RE = re.compile(r"^signage-backup-(auto-|pre-restore-)?\d{8}-\d{6}(-media)?\.tar\.gz$")
+NAME_RE = re.compile(r"^signage-backup-(auto-|pre-restore-|pre-migration-)?\d{8}-\d{6}(-media)?\.tar\.gz$")
 MEDIA_MEMBER_RE = re.compile(r"^media/(files|renditions|thumbs)/[0-9a-f]{32}(\.[a-z0-9]{2,5})$")
 
 
@@ -119,7 +119,8 @@ def list_backups(cfg):
             st = os.stat(p)
             out.append({"name": f, "size": st.st_size, "created": st.st_mtime,
                         "include_media": f.endswith("-media.tar.gz"),
-                        "automatic": "-auto-" in f, "pre_restore": "-pre-restore-" in f})
+                        "automatic": "-auto-" in f, "pre_restore": "-pre-restore-" in f,
+                        "pre_migration": "-pre-migration-" in f})
     out.sort(key=lambda b: b["created"], reverse=True)
     return out
 
