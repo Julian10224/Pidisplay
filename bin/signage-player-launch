@@ -8,14 +8,39 @@
 # Start de browserweergave drie keer achter elkaar niet (cage of Chromium stopt binnen 30 s),
 # dan valt dit script automatisch terug op mpv, zodat het scherm niet zwart blijft.
 # Terugzetten: sudo signage-admin renderer reset
+#
+# Stopt de browserweergave te snel, dan schrijft dit script de laatste uitvoer van cage,
+# Chromium en de player plus wat sessie- en systeeminformatie naar
+# /var/lib/signage/player/browser-last-failure.log. De beheerwebsite toont dat bestand onder
+# Instellingen → Weergave, zodat de oorzaak zonder SSH te zien is.
 set -u
 
 PY=/usr/bin/python3
 export PYTHONPATH="${PYTHONPATH:-/opt/signage/current/app}"
 CFG="${SIGNAGE_PLAYER_CONFIG:-/etc/signage/player.ini}"
-STATE_DIR=/var/lib/signage/player
+STATE_DIR="${SIGNAGE_PLAYER_STATE_DIR:-/var/lib/signage/player}"
 FAILS_FILE="$STATE_DIR/browser-failures"
+LAST_FAIL="$STATE_DIR/browser-last-failure.log"
+OUT="${XDG_RUNTIME_DIR:-/tmp}/browser-output.txt"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+diagnose() {
+    echo "Signage:   $(cat /opt/signage/current/VERSION 2>/dev/null || echo '?')"
+    echo "Systeem:   $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}") · kernel $(uname -r) · $(tr -d '\0' 2>/dev/null < /proc/device-tree/model || uname -m)"
+    echo "cage:      $(command -v cage || echo ontbreekt)"
+    local cb
+    cb="$(command -v chromium || command -v chromium-browser || true)"
+    echo "Chromium:  ${cb:-ontbreekt} $( [ -n "$cb" ] && timeout 15 "$cb" --version 2>/dev/null | head -n 1)"
+    echo "Gebruiker: $(id)"
+    echo "Sessie:    XDG_SESSION_ID=${XDG_SESSION_ID:-} XDG_SEAT=${XDG_SEAT:-} XDG_VTNR=${XDG_VTNR:-} XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
+    if [ -n "${XDG_SESSION_ID:-}" ] && command -v loginctl >/dev/null 2>&1; then
+        echo "logind:    $(loginctl show-session "$XDG_SESSION_ID" -p Active -p State -p Seat -p VTNr -p TTY -p Type -p Class 2>&1 | tr '\n' ' ')"
+    fi
+    echo "Console:   actieve VT $(cat /sys/class/tty/tty0/active 2>/dev/null || echo '?')"
+    echo "DRM:       $(ls -l /dev/dri 2>&1 | tail -n +2 | awk '{print $1, $3, $4, $NF}' | tr '\n' ';')"
+    echo "HDMI:      $(for f in /sys/class/drm/*/status; do printf '%s=%s ' "$(basename "$(dirname "$f")")" "$(cat "$f")"; done 2>/dev/null)"
+    echo "Geheugen:  $(awk '/MemTotal|MemAvailable|CmaTotal|CmaFree/ {printf "%s %d MB  ", $1, $2/1024}' /proc/meminfo)"
+}
 
 renderer="$("$PY" -c 'import configparser,sys
 c = configparser.ConfigParser(interpolation=None); c.read(sys.argv[1])
@@ -44,7 +69,10 @@ esac
 if [ "$mode" = browser ]; then
     start=$(date +%s)
     # -s: wisselen naar een andere console (Ctrl+Alt+F2) blijft mogelijk voor onderhoud.
-    cage -s -- "$PY" -m signage.player.daemon --renderer browser &
+    # Uitvoer gaat zoals altijd naar het systeemlogboek; de laatste 150 regels worden ook
+    # bewaard (alleen in het geheugen, 'tail' schrijft pas als cage stopt).
+    : > "$OUT" 2>/dev/null || OUT=/dev/null
+    cage -s -- "$PY" -m signage.player.daemon --renderer browser > >(tee >(tail -n 150 > "$OUT")) 2>&1 &
     child=$!
     trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 0' TERM INT
     wait "$child"
@@ -52,7 +80,19 @@ if [ "$mode" = browser ]; then
     ran=$(( $(date +%s) - start ))
     if [ "$ran" -lt 30 ]; then
         echo $(( fails + 1 )) > "$FAILS_FILE"
-        echo "signage-player-launch: browserweergave stopte na ${ran}s (poging $(( fails + 1 )))." >&2
+        echo "signage-player-launch: browserweergave stopte na ${ran}s met exitcode $rc (poging $(( fails + 1 )) van 3)." >&2
+        for _ in 1 2 3 4 5 6; do [ -s "$OUT" ] && break; sleep 0.5; done
+        {
+            echo "Browserweergave stopte na ${ran} s met exitcode $rc (poging $(( fails + 1 )) van 3) — $(date '+%Y-%m-%d %H:%M:%S')"
+            echo
+            diagnose
+            echo
+            echo "--- Laatste uitvoer van cage, Chromium en de player ---"
+            cat "$OUT" 2>/dev/null
+        } > "$LAST_FAIL.tmp" 2>&1
+        chmod 0644 "$LAST_FAIL.tmp" 2>/dev/null
+        mv -f "$LAST_FAIL.tmp" "$LAST_FAIL" 2>/dev/null
+        sed -n '1,/^--- /p' "$LAST_FAIL" >&2 2>/dev/null
     else
         echo 0 > "$FAILS_FILE"
     fi

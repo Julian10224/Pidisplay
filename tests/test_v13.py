@@ -322,3 +322,33 @@ def test_local_command_box_and_status_origin(tmp_path):
         assert got[-1] == {"phase": "PLAYING"}
     finally:
         srv.shutdown()
+
+
+def test_mpv_live_next_keeps_shuffle_rounds(tmp_path, fake_log):
+    """Met willekeurige volgorde blijft 'Volgende' willekeurig: volledige, geschudde rondes,
+    ook als willekeurig pas tijdens het afspelen wordt aangezet."""
+    _ini, player_ini = make_config(tmp_path, port=free_port())
+    items = _mpv_items(tmp_path, n=6)
+    names = [it["name"] + ".png" for it in items]
+    write_cache(str(tmp_path / "player-cache"), items)
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: len(loads(fake_log)) == 1)
+        _send(pt, "next")
+        assert wait_for(lambda: len(loads(fake_log)) == 2)
+        # willekeurig aanzetten tijdens het afspelen (bewerking van dezelfde playlist)
+        cfg = dict(pt.player.cfg, revision="r2",
+                   playlist={"id": 1, "name": "T", "repeat_mode": "loop", "mute": False, "shuffle": True})
+        pt.player.queue.put((cfg, []))
+        time.sleep(0.5)
+        for i in range(18):
+            n = len(loads(fake_log))
+            _send(pt, "next")
+            assert wait_for(lambda: len(loads(fake_log)) > n)
+        seq = loads(fake_log)[1:]          # vanaf het item waarop willekeurig aanging
+        rounds = [seq[i:i + 6] for i in range(0, 18, 6)]
+        assert all(sorted(r) == sorted(names) for r in rounds), rounds
+        assert sum(r == names for r in rounds) <= 1, f"op volgorde van de playlist: {rounds}"
+        assert pt.player.status()["current"]["shuffle"] is True
+    finally:
+        pt.stop()

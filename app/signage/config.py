@@ -39,6 +39,11 @@ DEFAULTS = {
         "local_player_config": "/etc/signage/player.ini",
         "auto_backup_keep": "14",
     },
+    "update": {
+        "enabled": "true",
+        "repo": "Julian10224/Pidisplay",
+        "branch": "main",
+    },
 }
 
 

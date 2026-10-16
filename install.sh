@@ -20,21 +20,24 @@
 #     --help
 #
 #  Het script is veilig opnieuw uit te voeren (ook voor updates): bestaande
-#  configuratie, database en media blijven altijd behouden.
+#  configuratie, database en media blijven altijd behouden. Opties die je bij een
+#  update niet opgeeft (--role, --no-browser, --no-watchdog, --no-gpu-mem) komen uit
+#  /etc/signage/install.conf, dat bij de eerste installatie wordt aangemaakt.
 # =============================================================================
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIG_VERSION="$(tr -d '[:space:]' < "$SRC/VERSION")"
-ROLE=all
+ROLE=""
 SERVER_URL=""
 TOKEN=""
 PORT=80
 OFFLINE=0
 DISABLE_DESKTOP=0
-WATCHDOG=1
-GPU_MEM=1
-BROWSER=1
+WATCHDOG=""
+GPU_MEM=""
+BROWSER=""
+INSTALL_CONF=/etc/signage/install.conf
 LOG=/var/log/signage-install.log
 NEEDS_REBOOT=0
 
@@ -59,7 +62,36 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Niet opgegeven opties: zoals bij de vorige installatie (update), anders de standaard.
+saved() { if [ -f "$INSTALL_CONF" ]; then sed -n "s/^$1=\([a-z0-9]*\)$/\1/p" "$INSTALL_CONF" | tail -n 1; fi; }
+EXISTING=0
+{ [ -f /etc/signage/signage.ini ] || [ -f /etc/signage/player.ini ]; } && EXISTING=1
+[ -n "$ROLE" ] || ROLE="$(saved role)"
+if [ -z "$ROLE" ]; then
+    ROLE=all
+    # Installatie van vóór 1.3.2 (zonder install.conf): rol afleiden uit de services.
+    if [ $EXISTING = 1 ]; then
+        srv=0; ply=0
+        systemctl is-enabled --quiet signage-server.service 2>/dev/null && srv=1
+        systemctl is-enabled --quiet signage-player.service 2>/dev/null && ply=1
+        if [ $srv = 1 ] && [ $ply = 0 ]; then ROLE=server; fi
+        if [ $srv = 0 ] && [ $ply = 1 ]; then ROLE=player; fi
+    fi
+fi
+[ -n "$BROWSER" ] || BROWSER="$(saved browser)"
+if [ -z "$BROWSER" ]; then
+    BROWSER=1
+    # Bestaande installatie zonder cage: toen met --no-browser geïnstalleerd; zo laten.
+    [ $EXISTING = 1 ] && [ -f /etc/signage/player.ini ] && ! command -v cage >/dev/null 2>&1 && BROWSER=0
+fi
+[ -n "$WATCHDOG" ] || WATCHDOG="$(saved watchdog)"
+[ -n "$GPU_MEM" ] || GPU_MEM="$(saved gpu_mem)"
+# Bij een update zonder install.conf geen nieuwe systeemwijzigingen (watchdog, config.txt).
+[ -n "$WATCHDOG" ] || { [ $EXISTING = 1 ] && WATCHDOG=0 || WATCHDOG=1; }
+[ -n "$GPU_MEM" ] || { [ $EXISTING = 1 ] && GPU_MEM=0 || GPU_MEM=1; }
+
 case "$ROLE" in all|server|player) ;; *) die "--role moet all, server of player zijn." ;; esac
+case "$BROWSER$WATCHDOG$GPU_MEM" in [01][01][01]) ;; *) die "Ongeldige waarden in $INSTALL_CONF." ;; esac
 [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "Ongeldige poort: $PORT"
 if [ "$ROLE" = player ]; then
     [ -n "$SERVER_URL" ] || [ -f /etc/signage/player.ini ] || die "--role player vereist --server URL en --token TOKEN."
@@ -407,6 +439,10 @@ if has_player; then
         c_warn "Player draait (nog) niet. Bekijk: journalctl -u signage-player -n 50"
     fi
 fi
+
+# Gekozen opties bewaren voor volgende updates (ook via de knop in de beheerwebsite).
+printf '# Signage: opties van de installatie, gebruikt bij updates zonder opties.\nrole=%s\nbrowser=%s\nwatchdog=%s\ngpu_mem=%s\n' \
+    "$ROLE" "$BROWSER" "$WATCHDOG" "$GPU_MEM" > "$INSTALL_CONF.tmp" && chmod 0644 "$INSTALL_CONF.tmp" && mv -f "$INSTALL_CONF.tmp" "$INSTALL_CONF"
 
 echo
 echo "=== Klaar: Signage $SIG_VERSION ==="

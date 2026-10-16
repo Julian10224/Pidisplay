@@ -36,6 +36,7 @@ Gebruik: sudo signage-admin <opdracht>
   renderer [auto|browser|mpv|reset]
                             Weergave van de player tonen of kiezen; 'reset' wist de
                             automatische terugval naar mpv na startproblemen
+  update                    Bijwerken naar de nieuwste versie op GitHub (internet nodig)
   rollback                  Terug naar de vorige geïnstalleerde softwareversie
   restart                   Server en player herstarten
   logs                      Logboek van server en player volgen
@@ -84,6 +85,9 @@ case "$cmd" in
         systemctl restart signage-server.service
         echo "Server herstart; de back-up is teruggezet."
         ;;
+    update)
+        need_root update
+        exec /bin/bash /opt/signage/current/bin/signage-update ;;
     rollback)
         need_root rollback
         prev="$(readlink -f /opt/signage/previous 2>/dev/null || true)"

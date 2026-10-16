@@ -83,8 +83,18 @@ def _renderer_info(cfg):
         pass
     import shutil as _sh
     browser_installed = bool(_sh.which("cage") and (_sh.which("chromium") or _sh.which("chromium-browser")))
+    # Uitvoer van de laatste mislukte start (geschreven door signage-player-launch).
+    last_failure, last_failure_at = None, None
+    path = os.path.join(pcfg.get("cache_dir"), "browser-last-failure.log")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            last_failure = fh.read()[-30000:]
+        last_failure_at = os.path.getmtime(path)
+    except OSError:
+        pass
     return {"setting": (pcfg.get("renderer") or "auto").strip().lower(), "browser_failures": fails,
-            "fallback_active": fails >= 3, "browser_installed": browser_installed}
+            "fallback_active": fails >= 3, "browser_installed": browser_installed,
+            "last_failure": last_failure, "last_failure_at": last_failure_at}
 
 
 def _parse_bool(value):

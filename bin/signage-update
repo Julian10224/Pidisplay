@@ -1,0 +1,99 @@
+#!/bin/bash
+# signage-update — Signage bijwerken naar de nieuwste versie op GitHub.
+#
+# Wordt als root gestart door de knop in de beheerwebsite (Instellingen → Software bijwerken,
+# via signage-priv en systemd-run, zodat de update doorloopt terwijl de server herstart)
+# of met:  sudo signage-admin update
+#
+# De bron staat in /etc/signage/signage.ini, sectie [update] (repo, branch, enabled). Alleen
+# root kan dat bestand wijzigen; de beheerwebsite kan de bron dus niet veranderen.
+# Voortgang voor de website: /var/lib/signage/update/status.json en update.log.
+# Configuratie, database en media blijven behouden (install.sh doet een gewone update).
+set -uo pipefail
+
+STATUS_DIR=/var/lib/signage/update
+STATUS="$STATUS_DIR/status.json"
+LOG="$STATUS_DIR/update.log"
+FROM="?"
+TO=""
+STARTED="$(date +%s)"
+
+write_status() {   # toestand melding
+    python3 - "$STATUS" "$1" "$2" "$FROM" "$TO" "$STARTED" <<'PY'
+import json, os, sys, time
+path, state, msg, frm, to, started = sys.argv[1:]
+data = {"state": state, "message": msg, "from": frm, "to": to or None,
+        "started": float(started), "updated": time.time()}
+with open(path + ".tmp", "w", encoding="utf-8") as fh:
+    json.dump(data, fh)
+os.chmod(path + ".tmp", 0o644)
+os.replace(path + ".tmp", path)
+PY
+}
+
+fail() {
+    echo "✘ $1"
+    write_status failed "$1"
+    exit 1
+}
+
+# Alles in main(): bash leest de functie volledig in voordat hij start. Het script kan dus
+# veilig worden vervangen terwijl install.sh een nieuwe release neerzet.
+main() {
+    [ "$(id -u)" = 0 ] || { echo "signage-update moet als root draaien (sudo signage-admin update)." >&2; exit 1; }
+    install -d -m 0755 "$STATUS_DIR"
+    exec 9>"$STATUS_DIR/.lock"
+    flock -n 9 || { echo "Er loopt al een update." >&2; exit 1; }
+    : > "$LOG"
+    chmod 0644 "$LOG"
+    exec > >(tee -a "$LOG") 2>&1
+
+    FROM="$(tr -d '[:space:]' < /opt/signage/current/VERSION 2>/dev/null || echo '?')"
+    local conf enabled repo branch
+    conf="$(python3 - <<'PY'
+import configparser
+c = configparser.ConfigParser(interpolation=None)
+c.read("/etc/signage/signage.ini", encoding="utf-8")
+print(c.get("update", "enabled", fallback="true").strip().lower(),
+      c.get("update", "repo", fallback="Julian10224/Pidisplay").strip() or "-",
+      c.get("update", "branch", fallback="main").strip() or "-")
+PY
+)" || fail "Configuratie kon niet worden gelezen."
+    read -r enabled repo branch <<< "$conf"
+    echo "=== Signage bijwerken — $(date '+%Y-%m-%d %H:%M:%S') ==="
+    echo "Huidige versie: $FROM · bron: github.com/$repo ($branch)"
+    case "$enabled" in true|yes|1|on) ;; *) fail "Bijwerken via de beheerwebsite staat uit ([update] enabled in signage.ini)." ;; esac
+    [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "Ongeldige repository in signage.ini: $repo"
+    [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "Ongeldige branch in signage.ini: $branch"
+
+    write_status running "Downloaden…"
+    local tmp
+    tmp="$(mktemp -d /tmp/signage-update.XXXXXX)"
+    trap 'rm -rf "$tmp"' EXIT
+    local url="${SIGNAGE_URL:-https://codeload.github.com/$repo/tar.gz/$branch}"
+    curl -fsSL --retry 3 --connect-timeout 20 --max-time 600 "$url" -o "$tmp/src.tar.gz" \
+        || fail "Downloaden mislukt. Heeft de Raspberry Pi internet?"
+    mkdir "$tmp/src"
+    tar -xzf "$tmp/src.tar.gz" -C "$tmp/src" --no-same-owner || fail "Het gedownloade archief is beschadigd."
+    local src
+    src="$(find "$tmp/src" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+    if [ -z "$src" ] || [ ! -f "$src/install.sh" ] || [ ! -f "$src/VERSION" ] || [ ! -d "$src/app/signage" ]; then
+        fail "Het gedownloade archief is geen Signage-pakket."
+    fi
+    TO="$(tr -d '[:space:]' < "$src/VERSION")"
+    echo "Gedownload: versie $TO"
+
+    write_status running "Versie $TO installeren… De website en het scherm zijn zo even niet bereikbaar."
+    # Opties zoals bij de vorige installatie (install.conf); configuratie, database en
+    # media blijven behouden.
+    if bash "$src/install.sh" < /dev/null; then
+        write_status done "Bijgewerkt van $FROM naar $TO."
+        echo "✔ Bijgewerkt van $FROM naar $TO."
+    else
+        local now
+        now="$(tr -d '[:space:]' < /opt/signage/current/VERSION 2>/dev/null || echo '?')"
+        fail "Installatie van $TO mislukt (zie het logboek hieronder). Actieve versie: $now. Terug naar de vorige versie: sudo signage-admin rollback"
+    fi
+}
+
+main "$@"
