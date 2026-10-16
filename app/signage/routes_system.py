@@ -72,6 +72,21 @@ def compute_warnings(conn, cfg, st, players):
     return warnings
 
 
+def _renderer_info(cfg):
+    from .config import read_player_config
+    pcfg = read_player_config(cfg.local_player_config)
+    fails = 0
+    try:
+        with open(os.path.join(pcfg.get("cache_dir"), "browser-failures"), encoding="utf-8") as fh:
+            fails = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        pass
+    import shutil as _sh
+    browser_installed = bool(_sh.which("cage") and (_sh.which("chromium") or _sh.which("chromium-browser")))
+    return {"setting": (pcfg.get("renderer") or "auto").strip().lower(), "browser_failures": fails,
+            "fallback_active": fails >= 3, "browser_installed": browser_installed}
+
+
 def _parse_bool(value):
     if isinstance(value, bool):
         return value
@@ -175,6 +190,7 @@ def register(app):
             player_service={"active": sysinfo.service_active("signage-player.service"),
                             "enabled": sysinfo.service_enabled("signage-player.service")},
             max_upload_mb=cfg.max_upload_bytes // (1024 * 1024),
+            renderer=_renderer_info(cfg),
             priv_available=bool(cfg.priv_helper and os.path.exists(cfg.priv_helper)),
         )
 
@@ -226,6 +242,14 @@ def register(app):
             raise ApiError(400, "Ongeldige actie.")
         state().priv("player", action)
         return jsonify(ok=True)
+
+    @app.post("/api/system/renderer")
+    def system_renderer():
+        value = str(body().get("renderer", ""))
+        if value not in ("auto", "browser", "mpv", "reset"):
+            raise ApiError(400, "Ongeldige weergave.")
+        state().priv("set-renderer", value, timeout=60)
+        return jsonify(ok=True, renderer=_renderer_info(state().cfg))
 
     @app.post("/api/system/reboot")
     def system_reboot():

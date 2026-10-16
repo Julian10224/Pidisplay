@@ -45,6 +45,7 @@ def video(path, color, size, seconds, bands=False):
 video(os.path.join(OUT, "portrait.webm"), "0xdc1e1e", "360x640", 2, bands=True)
 video(os.path.join(OUT, "landscape.webm"), "0x1ec8dc", "640x360", 1.5)
 video(os.path.join(OUT, "transition.webm"), "0xdc1edc", "640x360", 1.2)
+video(os.path.join(OUT, "short.webm"), "0x20c020", "640x360", 0.2)
 
 html = os.path.join(OUT, "html")
 os.makedirs(os.path.join(html, "page", "css"), exist_ok=True)

@@ -6,6 +6,7 @@ ExecStart als de juiste gebruiker met de opgegeven Environment-regels.
 Alleen voor tests; wordt NIET meegeleverd op de Pi.
 """
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -84,14 +85,14 @@ def start(unit):
         env["RUNTIME_DIRECTORY"] = d
     for pre in cfg["ExecStartPre"]:
         as_root = pre.startswith("+")
-        cmd = pre.lstrip("+").split()
+        cmd = shlex.split(pre.lstrip("+"))
         if not as_root and user != "root":
             cmd = ["runuser", "-u", user, "--"] + cmd
         r = subprocess.run(cmd, env=env)
         if r.returncode != 0:
             print(f"ExecStartPre faalde voor {unit}", file=sys.stderr)
             return 1
-    cmd = cfg["ExecStart"].split()
+    cmd = shlex.split(cfg["ExecStart"])
     if user != "root":
         envargs = [f"{k}={v}" for k, v in env.items() if k.startswith(("PYTHON", "SIGNAGE", "XDG", "RUNTIME", "FAKE"))]
         cmd = ["runuser", "-u", user, "--", "env"] + envargs + cmd

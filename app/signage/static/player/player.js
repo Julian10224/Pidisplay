@@ -76,7 +76,9 @@ function frames(n) {
   return new Promise((res) => { const step = () => (n-- <= 0 ? res() : requestAnimationFrame(step)); requestAnimationFrame(step); });
 }
 function timeout(promise, ms, what) {
-  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error(what + ': time-out')), ms))]);
+  let t;
+  const guard = new Promise((_, rej) => { t = setTimeout(() => rej(new Error(what + ': time-out')), ms); });
+  return Promise.race([promise, guard]).finally(() => clearTimeout(t));
 }
 function keyOf(item) { return item ? item.media_id + '|' + item.src + '|' + item.scale : null; }
 function fitClass(mode) { return 'fit-' + (mode === 'contain' || mode === 'fill' ? mode : 'cover'); }
@@ -202,8 +204,14 @@ function syncTransitions(conf) {
   for (const id of Object.keys(tslots)) {
     if (!keep.has(id) && (!activeTransition || activeTransition.id !== id)) { destroySlot(tslots[id].slot); delete tslots[id]; }
   }
+  const muted = !!((conf.playlist || {}).mute);
+  const vol = Math.max(0, Math.min(1, (conf.volume == null ? 80 : conf.volume) / 100));
   for (const [id, t] of Object.entries(wanted)) {
-    if (tslots[id] && tslots[id].src === t.src) continue;
+    if (tslots[id] && tslots[id].src === t.src) {
+      const m = tslots[id].slot.media;   // volume en geluid volgen gewijzigde instellingen
+      if (m) { m.muted = muted; m.volume = vol; }
+      continue;
+    }
     if (tslots[id]) destroySlot(tslots[id].slot);
     const slot = makeSlot({ kind: 'video', src: t.src, name: 'overgang ' + (t.name || ''), scale: conf.scale_default },
       { muted: !!((conf.playlist || {}).mute), volume: conf.volume });
@@ -255,10 +263,16 @@ function commit(p) {
   fallbackActive = p.fb;
 }
 
-function schedulePreload() {
+function schedulePreload(opts) {
   const p = peekNext();
   if (p.type !== 'item') return;
   const item = p.list[p.idx];
+  const lead = HTML_READY_MAX + 1000;
+  if (item.kind === 'html' && opts && opts.htmlLater > lead) {
+    const g = gen;
+    later(opts.htmlLater - lead, () => { if (g === gen && state === S.PLAYING) schedulePreload(); });
+    return;
+  }
   const key = keyOf(item);
   if (preload && preload.key === key) return;
   cancelPreload();
@@ -309,6 +323,15 @@ async function advance(g) {
 
 async function startNext(g, item, slot) {
   setState(S.STARTING_NEXT, item.name);
+  // Luisteraars vóór het starten koppelen: een heel korte video kan anders al afgelopen
+  // zijn voordat we luisteren. itemDone() negeert alles buiten PLAYING.
+  let endedEarly = false;
+  if (slot.kind === 'video') {
+    slot.media.addEventListener('ended', () => { endedEarly = true; itemDone(g); }, { once: true });
+    slot.media.addEventListener('error', () => {
+      if (g === gen && state === S.PLAYING) { log(`Video '${item.name}' gaf een fout tijdens het afspelen.`); itemDone(g); }
+    }, { once: true });
+  }
   showSlot(slot);
   if (slot.kind === 'video') {
     try { await slot.media.play(); } catch (e) {
@@ -328,8 +351,7 @@ async function startNext(g, item, slot) {
   clearTimers();
   setState(S.PLAYING, item.name);
   if (slot.kind === 'video') {
-    slot.media.addEventListener('ended', () => itemDone(g), { once: true });
-    slot.media.addEventListener('error', () => { if (g === gen && state === S.PLAYING) { log(`Video '${item.name}' gaf een fout tijdens het afspelen.`); itemDone(g); } }, { once: true });
+    if (endedEarly || slot.media.ended) { later(0, () => itemDone(g)); }
     const vd = Number(item.video_duration) || 0;
     later(vd ? (vd * 1.5 + 30) * 1000 : 30 * 60 * 1000, () => {
       if (g === gen && state === S.PLAYING) { log(`Video '${item.name}' loopt vast; volgende item.`); itemDone(g); }
@@ -337,8 +359,15 @@ async function startNext(g, item, slot) {
   } else {
     later(Math.max(1, Number(item.duration) || 10) * 1000, () => itemDone(g));
   }
-  later(300, () => { if (g === gen) schedulePreload(); });
+  // Volgend item alvast voorbereiden. Een HTML-pagina pas kort voor het einde, zodat haar
+  // eigen animaties en timers niet al lopen terwijl ze nog onzichtbaar is.
+  later(300, () => { if (g === gen) schedulePreload({ htmlLater: currentRemaining(item) }); });
   return true;
+}
+
+function currentRemaining(item) {
+  const secs = item.kind === 'video' ? Number(item.video_duration) || 0 : Math.max(1, Number(item.duration) || 10);
+  return secs * 1000 - 300;
 }
 
 async function itemDone(g) {
@@ -376,13 +405,19 @@ async function itemDone(g) {
   if (g !== gen) { rearmTransition(t); return; }
   activeTransition = t;
   setState(S.PLAYING_TRANSITION, t.name);
+  // De overgangsvideo blijft bestaan; alle luisteraars en timers van deze ronde worden
+  // daarna verwijderd, zodat er bij langdurig afspelen niets ophoopt.
+  const ac = new AbortController();
+  let tmo;
   const finished = new Promise((res) => {
-    v.addEventListener('ended', () => res('ok'), { once: true });
-    v.addEventListener('error', () => res('fout'), { once: true });
+    v.addEventListener('ended', () => res('ok'), { signal: ac.signal });
+    v.addEventListener('error', () => res('fout'), { signal: ac.signal });
     const td = Number(t.duration) || 30;
-    setTimeout(() => res('time-out'), (td + 5) * 1000);
+    tmo = setTimeout(() => res('time-out'), (td + 5) * 1000);
   });
   const how = await finished;
+  ac.abort();
+  clearTimeout(tmo);
   if (g !== gen || state !== S.PLAYING_TRANSITION) return;
   if (how !== 'ok') log(`Overgang '${t.name || tid}' afgebroken (${how}).`);
   // De overgang blijft op het laatste frame staan tot het volgende item zichtbaar is.

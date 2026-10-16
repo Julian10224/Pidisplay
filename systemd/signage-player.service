@@ -32,7 +32,8 @@ Environment=HOME=/var/lib/signage/player
 Environment=XDG_RUNTIME_DIR=/run/signage-player
 RuntimeDirectory=signage-player
 RuntimeDirectoryMode=0700
-ExecStart=/opt/signage/current/bin/signage-player-launch
+# Releases zonder startscript (1.0.x, na 'signage-admin rollback') starten de player direct.
+ExecStart=/bin/sh -c 'if [ -x /opt/signage/current/bin/signage-player-launch ]; then exec /opt/signage/current/bin/signage-player-launch; else exec /usr/bin/python3 -m signage.player.daemon; fi'
 # De daemon meldt zich elke halve seconde; blijft dat 60 s uit, dan herstart systemd de player.
 WatchdogSec=60
 Restart=always

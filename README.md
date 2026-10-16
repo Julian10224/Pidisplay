@@ -10,7 +10,7 @@ Eén Raspberry Pi is tegelijk **server**, **beheeromgeving** en **player**:
 Na de installatie is **geen internet** meer nodig. Alleen de eerste installatie (en updates
 van systeempakketten) downloadt pakketten.
 
-Versie: zie `VERSION`. Wijzigingen per versie: `CHANGELOG.md`.
+Versie: zie `VERSION`. Wijzigingen per versie: `CHANGELOG.md`. Controle per eis: `CONTROLE.md`.
 
 ---
 
@@ -143,7 +143,7 @@ contact, wat er speelt, of de HDMI-aansluiting een scherm ziet en met welke reso
 schermstand (liggend/staand/ondersteboven), weergave en welke playlist de player volgt.
 
 **Instellingen** — systeemnaam, standaardplaylist, standaardduur, volume, **schaalmodus**,
-player herstarten/uitzetten, hostnaam, tijdzone, tijdsynchronisatie, tijd handmatig instellen,
+**weergave/kioskmodus** (automatisch, browser of mpv), player herstarten/uitzetten, hostnaam, tijdzone, tijdsynchronisatie, tijd handmatig instellen,
 back-ups, logboeken, systeeminformatie, herstart, wachtwoord.
 
 ---
@@ -226,7 +226,7 @@ ffmpeg -i invoer.mov -c:v libx264 -profile:v high -level 4.0 -pix_fmt yuv420p \
 
 Of video's in Chromium op de Pi 3B+ hardwarematig worden gedecodeerd is niet getest (zie §18).
 Controleer het percentage overgeslagen videoframes op het dashboard; is dat hoog, gebruik dan
-720p-video's of kies de mpv-weergave (`sudo signage-admin renderer mpv`, zonder HTML).
+720p-video's of kies de mpv-weergave (*Instellingen → Weergave*, of `sudo signage-admin renderer mpv`; zonder HTML).
 
 ---
 
@@ -322,7 +322,7 @@ niets afspeelbaar ─▶ STANDBY ─(30 s of nieuwe playlist)─▶ LOADING_NEXT
   of te weinig vrij geheugen → herstart, met een afkoelperiode na 5 herstarts in 10 minuten.
   De services stoppen na 10 pogingen in 10 minuten, zodat een hardwareprobleem zichtbaar blijft.
 - **Browserproblemen**: drie mislukte starts van de browserweergave → automatisch mpv.
-  Terugzetten met `sudo signage-admin renderer reset`.
+  Terugzetten met *Instellingen → Weergave → Browserweergave opnieuw proberen* of `sudo signage-admin renderer reset`.
 - **Hardware-watchdog** (`RuntimeWatchdogSec=15`): herstart de Pi als het hele systeem
   vastloopt. Uitschakelen: `sudo rm /etc/systemd/system.conf.d/signage-watchdog.conf` en herstart.
 - **Kapotte bestanden en pagina's**: worden overgeslagen en gemeld; een vastgelopen
@@ -419,7 +419,7 @@ eigen playlist. Het downloaden is getest; een tweede fysieke Pi niet.
 | `/etc/signage/player.ini` | Serveradres, player-token, weergave (`renderer`), Chromium- en mpv-opties. Na wijzigen: `sudo systemctl restart signage-player` |
 
 Elke optie is in het bestand zelf gedocumenteerd. Weergave kiezen zonder bestand te bewerken:
-`sudo signage-admin renderer auto|browser|mpv` (en `reset`).
+*Instellingen → Weergave* in de beheerwebsite, of `sudo signage-admin renderer auto|browser|mpv` (en `reset`).
 
 Opties van het installatiescript: `sudo bash install.sh --help`
 (`--role`, `--server`, `--token`, `--port`, `--offline`, `--disable-desktop`, `--no-watchdog`,
@@ -513,9 +513,9 @@ journalctl -u signage-player -n 100
 Er was geen toegang tot een Raspberry Pi of het aangesloten scherm. Getest is in een
 Linux-testomgeving (x86_64, Python 3.13 zoals Raspberry Pi OS Trixie):
 
-1. **Automatische tests** — `python3 -m pytest tests/` — **69 tests, alle geslaagd**:
+1. **Automatische tests** — `python3 -m pytest tests/` — **72 tests, alle geslaagd**:
    - `test_api.py` (27): login, CSRF, uploads, playlists, player-API, back-up/herstel;
-   - `test_v11.py` (14): migratie van een echte 1.0-database, HTML-bestanden en ZIP's
+   - `test_v11.py` (15): migratie van een echte 1.0-database, HTML-bestanden en ZIP's
      (inclusief path traversal, absolute paden, symlinks, verboden types, ZIP-bom),
      ingebouwde pagina's, ontwerpformaat, overgangen, schaalmodi, verwijderen van een
      overgangsvideo, externe player die een HTML-project downloadt, beveiliging en
@@ -523,7 +523,7 @@ Linux-testomgeving (x86_64, Python 3.13 zoals Raspberry Pi OS Trixie):
    - `test_player.py` (11): mpv-weergave tegen een nagebootste mpv (volgorde, kapotte en
      ontbrekende bestanden, standby, vastgelopen mpv, overgangen, schaalmodi, HTML overslaan,
      offline doorspelen, cache na herstart);
-   - `test_browser_player.py` (17): de echte playerpagina in Chromium (headless) met
+   - `test_browser_player.py` (19): de echte playerpagina in Chromium (headless) met
      schermafbeeldingen en pixelmetingen.
 2. **Browserweergave** in Chromium: schaalmodi voor foto, video en HTML (vullen = geen zwart en
    proportioneel, passend = zwarte randen, uitrekken = vervormd), kleine foto opgeschaald,

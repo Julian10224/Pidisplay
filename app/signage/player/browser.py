@@ -210,9 +210,21 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.do_GET()
 
+    def _host(self):
+        return (self.headers.get("Host") or "").split(":")[0].lower()
+
     def do_GET(self):
         path = unquote(urlsplit(self.path).path)
         ps = self.server.page_state
+        # Twee origins op één poort: de playerpagina en de media op 127.0.0.1, HTML-content op
+        # localhost. HTML-content krijgt zo niets van de player te zien (status, configuratie)
+        # en kan die ook niet beïnvloeden; de player levert omgekeerd geen HTML-projecten.
+        host = self._host()
+        if host == "localhost":
+            if not (path.startswith("/h/") or path.startswith("/d/")):
+                return self._send_bytes(404, b"niet gevonden", "text/plain")
+        elif path.startswith("/h/") or path.startswith("/d/"):
+            return self._send_bytes(404, b"niet gevonden", "text/plain")
         if path in ("/", "/index.html"):
             return self._send_file(os.path.join(PLAYER_DIR, "player.html"), cache=False)
         if path in ("/player.js", "/player.css"):
@@ -239,7 +251,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send_bytes(404, b"niet gevonden", "text/plain")
 
     def do_POST(self):
-        if urlsplit(self.path).path != "/status":
+        if urlsplit(self.path).path != "/status" or self._host() != "127.0.0.1":
             return self._send_bytes(404, b"", "text/plain")
         try:
             n = min(int(self.headers.get("Content-Length") or 0), 65536)

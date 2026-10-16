@@ -40,7 +40,7 @@ def free_port():
 
 @pytest.fixture(scope="module")
 def media():
-    if not os.path.exists(os.path.join(MEDIA, "transition.webm")):
+    if not os.path.exists(os.path.join(MEDIA, "short.webm")):
         subprocess.run([sys.executable, os.path.join(HERE, "browser", "make_media.py"), MEDIA], check=True)
     return MEDIA
 
@@ -75,7 +75,7 @@ class Rig:
                           "width": design[0] if design else None, "height": design[1] if design else None}
         else:
             it["local"] = os.path.join(self.media, name)
-            it["video_duration"] = {"portrait.webm": 2, "landscape.webm": 1.5}.get(name)
+            it["video_duration"] = {"portrait.webm": 2, "landscape.webm": 1.5, "short.webm": 0.2}.get(name)
         return it
 
     def write(self, items, playlist_id=1, repeat="loop", transitions=None, rotation=0, scale_default="cover"):
@@ -353,3 +353,22 @@ def test_status_reports_viewport(rig):
     snap = rig.js("window.__signage.snapshot()")
     assert snap["viewport"]["w"] == W and snap["viewport"]["h"] == H
     assert snap["current"]["name"] == "small.png" and snap["phase"] == "PLAYING"
+
+
+def test_very_short_video_does_not_stall(rig):
+    rig.write([rig.item("video", "short.webm"), rig.item("image", "small.png", duration=1)])
+    rig.start()
+    t0 = time.time()
+    rig.wait_playing("small.png", timeout=15, count=3)
+    assert time.time() - t0 < 10, "korte video wachtte op de time-out"
+    assert rig.probe()["blank"] == 0
+
+
+def test_html_is_not_preloaded_too_early(rig):
+    rig.write([rig.item("image", "small.png", duration=8), rig.item("html", "page", duration=2)])
+    rig.start()
+    rig.wait_playing("small.png")
+    time.sleep(1.5)
+    assert rig.js("document.querySelectorAll('#stage iframe').length") == 0, "HTML al geladen terwijl er nog 6 s te gaan was"
+    rig.wait_playing("page", timeout=15)
+    assert rig.probe()["blank"] == 0

@@ -180,16 +180,19 @@ if [ ${#BROWSER_PKGS[@]} -gt 0 ]; then
     for p in "${BROWSER_PKGS[@]}"; do
         dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || BMISSING+=("$p")
     done
-    if [ ${#BMISSING[@]} -gt 0 ] && [ $OFFLINE = 1 ]; then
-        c_warn "Browserweergave niet beschikbaar (offline, ontbreekt: ${BMISSING[*]}); de player gebruikt mpv (geen HTML)."
-    elif [ ${#BMISSING[@]} -gt 0 ]; then
+    if [ ${#BMISSING[@]} -gt 0 ] && [ $OFFLINE = 0 ]; then
         c_info "Browserweergave installeren (kan op een Pi 3B+ enkele minuten duren): ${BMISSING[*]}"
-        if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${BMISSING[@]}"; then
-            c_warn "Chromium/cage konden niet worden geïnstalleerd; de player gebruikt mpv (geen HTML)."
-        fi
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${BMISSING[@]}" || true
+        BMISSING=()
+        for p in "${BROWSER_PKGS[@]}"; do
+            dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || BMISSING+=("$p")
+        done
     fi
-    command -v cage >/dev/null && { command -v chromium >/dev/null || command -v chromium-browser >/dev/null; } \
-        && c_ok "Browserweergave beschikbaar (cage + Chromium)"
+    if [ ${#BMISSING[@]} -eq 0 ]; then
+        c_ok "Browserweergave beschikbaar (cage + Chromium)"
+    else
+        c_warn "Browserweergave niet beschikbaar (ontbreekt: ${BMISSING[*]}); de player gebruikt mpv (geen HTML)."
+    fi
 fi
 
 # Snelle controle dat de Python-modules werken.

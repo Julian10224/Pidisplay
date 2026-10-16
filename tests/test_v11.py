@@ -307,6 +307,19 @@ def test_local_player_server_security_and_ranges(tmp_path):
         assert r.status == 206 and r.read() == bytes(range(10, 20))
         assert urllib.request.urlopen(state["items"][1]["src"]).read() == b"<p>x</p>"
         assert urllib.request.urlopen(state["items"][2]["src"]).status == 200
+        # HTML-content (localhost) mag de status en configuratie van de player niet zien of wijzigen.
+        for bad in (f"http://localhost:{port}/state", f"http://localhost:{port}/", f"http://localhost:{port}{state['items'][0]['src']}",
+                    f"http://127.0.0.1:{port}" + state["items"][1]["src"].split(str(port), 1)[1]):
+            try:
+                urllib.request.urlopen(bad)
+                assert False, bad
+            except urllib.error.HTTPError as e:
+                assert e.code == 404, bad
+        try:
+            urllib.request.urlopen(urllib.request.Request(f"http://localhost:{port}/status", data=b"{}", method="POST"))
+            assert False, "status via localhost"
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
         for bad in ("/h/proj/../geheim.txt", "/h/proj/%2e%2e/geheim.txt", "/m/../geheim.txt", "/d/../player/player.js",
                     "/m/geheim.txt", "/etc/passwd"):
             try:
@@ -316,3 +329,11 @@ def test_local_player_server_security_and_ranges(tmp_path):
                 assert e.code == 404, bad
     finally:
         srv.shutdown()
+
+
+def test_renderer_setting_api(client):
+    info = client.get("/api/system/info").json
+    assert info["renderer"]["setting"] == "auto" and info["renderer"]["fallback_active"] is False
+    assert client.post("/api/system/renderer", json={"renderer": "chrome"}, headers=client.h).status_code == 400
+    # Zonder root-hulpprogramma (testomgeving) wordt de wijziging netjes geweigerd.
+    assert client.post("/api/system/renderer", json={"renderer": "mpv"}, headers=client.h).status_code == 501

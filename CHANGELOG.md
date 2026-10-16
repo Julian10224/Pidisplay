@@ -1,5 +1,35 @@
 # Wijzigingen
 
+## 1.1.1 — controle van de volledige code tegen beide opdrachten
+
+Gevonden en opgelost:
+
+- **Geheugenlek bij overgangen** (browserweergave): elke overgang liet een event-listener
+  achter op de overgangsvideo; bij langdurig draaien liep dat op. Nu worden alle luisteraars
+  en timers per overgang opgeruimd.
+- **Isolatie van HTML-content**: een geüploade pagina kon via de lokale playerserver de
+  status van de player lezen en een valse status sturen. De server levert de player nu
+  alleen op 127.0.0.1 en HTML-content alleen op localhost.
+- **Heel korte video's** konden afgelopen zijn voordat de player luisterde; de player liep
+  dan pas na de time-out door. Luisteraars worden nu vóór het starten gekoppeld.
+- **HTML werd te vroeg vooraf geladen**: animaties in de pagina liepen al terwijl die nog
+  onzichtbaar was. HTML wordt nu pas kort (5 s) voor het einde van het vorige item geladen.
+- **Volume/geluid van overgangen** volgde een gewijzigde instelling pas na een playlistwissel.
+- **Terugdraaien naar 1.0** (`signage-admin rollback`) zou de player-service breken (1.0 heeft
+  geen startscript); de service start zo'n versie nu direct, en rollback wijst op de
+  back-up van vóór de databasemigratie.
+- **Installer** meldde in één run zowel 'browserweergave beschikbaar' als 'niet beschikbaar'.
+
+Toegevoegd:
+
+- **Weergave/kioskmodus instelbaar in de beheerwebsite** (*Instellingen → Weergave*):
+  automatisch, browser of mpv, en 'browserweergave opnieuw proberen' na een automatische
+  terugval (eis 'player- en kioskmodus' in de instellingen).
+
+Tests: 72 automatische tests geslaagd (nieuw: korte video, HTML niet te vroeg geladen,
+isolatie van de lokale playerserver, weergave-instelling), beheerwebsite 22 + 14 stappen,
+installatie/update/rollback en `check_installed_v11.py` 13/13 op het geïnstalleerde testsysteem.
+
 ## 1.1.0 — overgangsvideo's, HTML-content en beeldvullende weergave
 
 ### Inventarisatie van de bestaande code (1.0.0)

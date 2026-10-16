@@ -95,6 +95,10 @@ case "$cmd" in
         ln -sfn "$cur" /opt/signage/previous.tmp && mv -T /opt/signage/previous.tmp /opt/signage/previous
         systemctl restart signage-server.service signage-player.service 2>/dev/null || true
         echo "Teruggezet naar $(basename "$prev"). (Vorige: $(basename "$cur"))"
+        if compgen -G "/var/lib/signage/backups/signage-backup-pre-migration-*" >/dev/null; then
+            echo "Let op: de database is bij een update bijgewerkt. Werkt de oudere versie niet goed, zet dan de"
+            echo "back-up van vóór die update terug:  sudo signage-admin restore /var/lib/signage/backups/signage-backup-pre-migration-<datum>.tar.gz"
+        fi
         ;;
     renderer)
         cur="$("$PY" -c 'import configparser;c=configparser.ConfigParser(interpolation=None);c.read("/etc/signage/player.ini");print(c.get("player","renderer",fallback="auto"))')"

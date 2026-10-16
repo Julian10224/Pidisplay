@@ -1218,6 +1218,23 @@ function SettingsPage({ user, onLogout }) {
             </div>
             <p class="muted small">Per playlistitem kun je hiervan afwijken. HTML-pagina's vullen het scherm altijd zelf, behalve als je bij de pagina een vast ontwerpformaat instelt; dan geldt de schaalmodus ook voor de pagina.</p>
           </fieldset>
+          <fieldset class="fieldset" style="margin-bottom:16px"><legend>Weergave van deze player (kioskmodus)</legend>
+            ${info.renderer && html`<div class="stack" style="gap:10px">
+              <div class="row" style="align-items:end">
+                <label class="field" style="flex:1;min-width:220px">Weergave
+                  <select value=${info.renderer.setting} disabled=${!priv || busy === 'renderer'}
+                    onChange=${(e) => run('renderer', async () => { const r = await api('POST', '/api/system/renderer', { renderer: e.target.value }); setInfo({ ...info, renderer: r.renderer }); }, 'Weergave opgeslagen; de player herstart.')}>
+                    <option value="auto">Automatisch (browser als die beschikbaar is)</option>
+                    <option value="browser">Browser: foto's, video's, HTML en overgangen</option>
+                    <option value="mpv">mpv: foto's, video's en overgangen, geen HTML</option>
+                  </select></label>
+                ${info.renderer.fallback_active && html`<button class="btn" disabled=${!priv || busy === 'renderer'}
+                  onClick=${() => run('renderer', async () => { const r = await api('POST', '/api/system/renderer', { renderer: 'reset' }); setInfo({ ...info, renderer: r.renderer }); }, 'Browserweergave wordt opnieuw geprobeerd.')}>Browserweergave opnieuw proberen</button>`}
+              </div>
+              ${!info.renderer.browser_installed && html`<p class="muted small">De browserweergave (Chromium en cage) is niet geïnstalleerd; de player gebruikt mpv. Installeer opnieuw zonder <code>--no-browser</code> om HTML te kunnen tonen.</p>`}
+              ${info.renderer.fallback_active && html`<div class="notice warning"><${Icon} name="alert" /><span>De browserweergave startte drie keer niet; de player is automatisch overgeschakeld op mpv. HTML-pagina's worden overgeslagen. Bekijk het logboek en probeer het opnieuw.</span></div>`}
+            </div>`}
+          </fieldset>
           <dl class="facts" style="margin-bottom:14px"><dt>Player</dt><dd>${info.player_service.active ? html`<span class="badge ok">actief</span>` : html`<span class="badge alert">gestopt</span>`}</dd>
             <dt>Automatisch starten</dt><dd>${info.player_service.enabled ? 'aan' : 'uit'}</dd></dl>
           <div class="row">
