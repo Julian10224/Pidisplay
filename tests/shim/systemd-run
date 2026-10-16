@@ -1,0 +1,11 @@
+#!/bin/bash
+# Nagebootste systemd-run voor tests: voert het commando na 2 s los van de aanroeper uit
+# (zoals systemd dat doet), zodat sudo het niet opruimt.
+echo "systemd-run $*" >> /run/shim/calls.log
+args=()
+for a in "$@"; do case "$a" in --*) ;; *) args+=("$a") ;; esac; done
+case "${args[*]}" in *reboot*) exit 0 ;; esac
+# In de testomgeving de nagebootste systemctl gebruiken in plaats van de echte.
+[ "${args[0]}" = /usr/bin/systemctl ] && args[0]=/usr/local/sbin/systemctl
+setsid bash -c 'sleep 2; "$@"' _ "${args[@]}" </dev/null >/dev/null 2>&1 &
+exit 0

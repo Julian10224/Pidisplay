@@ -1,0 +1,106 @@
+#!/bin/bash
+# signage-admin — opdrachtregelbeheer voor het signage-systeem.
+# Dataopdrachten draaien als gebruiker 'signage'; service-acties vereisen root.
+set -euo pipefail
+
+export PYTHONPATH=/opt/signage/current/app
+export SIGNAGE_CONFIG=/etc/signage/signage.ini
+PY=/usr/bin/python3
+
+as_signage() {
+    if [ "$(id -un)" = "signage" ]; then
+        "$PY" -m signage.cli "$@"
+    elif [ "$(id -u)" = 0 ]; then
+        runuser -u signage -- env PYTHONPATH="$PYTHONPATH" SIGNAGE_CONFIG="$SIGNAGE_CONFIG" "$PY" -m signage.cli "$@"
+    else
+        echo "Gebruik: sudo signage-admin $*" >&2
+        exit 1
+    fi
+}
+
+need_root() {
+    if [ "$(id -u)" != 0 ]; then echo "Gebruik: sudo signage-admin $1" >&2; exit 1; fi
+}
+
+usage() {
+    cat <<'EOF'
+Gebruik: sudo signage-admin <opdracht>
+
+  status                    Status, versie en beheerder(s)
+  setup-code                Toon de setup-code (zolang er geen beheerder is)
+  reset-password [naam]     Nieuw wachtwoord instellen voor de beheerder
+  reset-admin               Beheerder wissen; opnieuw instellen via de setup-code
+  backup [--with-media] [--output MAP]
+                            Back-up maken (optioneel ook naar bijv. een USB-stick)
+  restore BESTAND           Back-up terugzetten (server herstart)
+  rollback                  Terug naar de vorige geïnstalleerde softwareversie
+  restart                   Server en player herstarten
+  logs                      Logboek van server en player volgen
+EOF
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    ""|-h|--help|help) usage ;;
+    status)
+        as_signage status
+        echo "Server:            $(systemctl is-active signage-server.service 2>/dev/null || true)"
+        echo "Player:            $(systemctl is-active signage-player.service 2>/dev/null || true)"
+        echo "Release:           $(readlink -f /opt/signage/current)"
+        ;;
+    setup-code|reset-password|reset-admin)
+        as_signage "$@" ;;
+    backup)
+        # --output (bijv. een USB-stick) wordt als root gekopieerd: die map is meestal
+        # niet schrijfbaar voor de gebruiker 'signage'.
+        shift
+        out=""; pass=()
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --output) out="${2:-}"; shift 2 ;;
+                *) pass+=("$1"); shift ;;
+            esac
+        done
+        file="$(as_signage backup "${pass[@]}")"
+        if [ -n "$out" ]; then
+            need_root "backup --output"
+            mkdir -p "$out"
+            cp "$file" "$out/"
+            echo "$out/$(basename "$file")"
+        else
+            echo "$file"
+        fi
+        ;;
+    restore)
+        need_root restore
+        [ -n "${2:-}" ] || { echo "Gebruik: sudo signage-admin restore BESTAND" >&2; exit 2; }
+        tmp="/var/lib/signage/tmp/cli-restore.tar.gz"
+        install -o signage -g signage -m 0640 "$2" "$tmp"
+        as_signage restore "$tmp"
+        rm -f "$tmp"
+        systemctl restart signage-server.service
+        echo "Server herstart; de back-up is teruggezet."
+        ;;
+    rollback)
+        need_root rollback
+        prev="$(readlink -f /opt/signage/previous 2>/dev/null || true)"
+        cur="$(readlink -f /opt/signage/current)"
+        if [ -z "$prev" ] || [ ! -d "$prev" ] || [ "$prev" = "$cur" ]; then
+            echo "Geen vorige versie beschikbaar." >&2; exit 1
+        fi
+        ln -sfn "$prev" /opt/signage/current.tmp && mv -T /opt/signage/current.tmp /opt/signage/current
+        ln -sfn "$cur" /opt/signage/previous.tmp && mv -T /opt/signage/previous.tmp /opt/signage/previous
+        systemctl restart signage-server.service signage-player.service 2>/dev/null || true
+        echo "Teruggezet naar $(basename "$prev"). (Vorige: $(basename "$cur"))"
+        ;;
+    restart)
+        need_root restart
+        systemctl restart signage-server.service 2>/dev/null || true
+        systemctl restart signage-player.service 2>/dev/null || true
+        echo "Herstart."
+        ;;
+    logs)
+        exec journalctl -u signage-server.service -u signage-player.service -f -n 100 ;;
+    *)
+        usage; exit 2 ;;
+esac

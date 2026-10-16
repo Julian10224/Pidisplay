@@ -1,0 +1,264 @@
+"""API: players/schermen beheren en de endpoints die players zelf aanroepen."""
+
+import hashlib
+import hmac
+import json
+import logging
+import os
+import re
+import secrets
+import time
+import uuid
+
+from flask import jsonify, request, send_file
+
+from . import __version__, db, media
+from .app import ApiError, body, get_db, hash_token, refresh_standby, state
+from .routes_playlists import get_playlist_row, playlist_items
+
+log = logging.getLogger("signage.players")
+
+ONLINE_AFTER = 45        # seconden zonder heartbeat => offline
+LAST_SEEN_WRITE = 300    # schrijf last_seen hooguit eens per 5 minuten (SD-kaart sparen)
+
+
+def effective_playlist_id(conn, player_row, settings=None):
+    settings = settings or db.get_settings(conn)
+    if player_row["playlist_id"] is not None:
+        return player_row["playlist_id"]
+    return settings.get("default_playlist_id")
+
+
+def active_playlist_ids(conn):
+    settings = db.get_settings(conn)
+    return {effective_playlist_id(conn, r, settings) for r in conn.execute("SELECT * FROM players")} - {None}
+
+
+def _items_payload(conn, cfg, pid, settings):
+    out = []
+    for it in playlist_items(conn, pid):
+        paths = media.media_paths(cfg, it)
+        if not os.path.exists(paths["playback"]):
+            continue  # ontbrekende bestanden worden nooit naar de player gestuurd
+        out.append({
+            "media_id": it["id"], "name": it["name"], "kind": it["kind"],
+            "path": paths["playback"], "url": f"/api/player/v1/media/{it['id']}",
+            "sha256": it["playback_sha256"], "size": it["playback_size"],
+            "ext": os.path.splitext(paths["playback"])[1].lower(),
+            "duration": (it["item_duration"] or settings["default_image_duration"]) if it["kind"] == "image" else None,
+            "video_duration": it["duration"] if it["kind"] == "video" else None,
+        })
+    return out
+
+
+def build_player_config(conn, cfg, player_row):
+    st = state()
+    settings = db.get_settings(conn)
+    pid = effective_playlist_id(conn, player_row, settings)
+    playlist = None
+    items = []
+    fallback = []
+    if pid is not None:
+        row = conn.execute("SELECT * FROM playlists WHERE id = ?", (pid,)).fetchone()
+        if row is not None:
+            playlist = {"id": row["id"], "name": row["name"], "repeat_mode": row["repeat_mode"],
+                        "mute": bool(row["mute"])}
+            items = _items_payload(conn, cfg, row["id"], settings)
+            default_id = settings.get("default_playlist_id")
+            if row["repeat_mode"] == "once_then_default" and default_id and default_id != row["id"]:
+                fallback = _items_payload(conn, cfg, default_id, settings)
+    if st.standby_sha is None or not os.path.exists(cfg.standby_path):
+        refresh_standby(st, force=True)
+    payload = {
+        "player": {"id": player_row["id"], "name": player_row["name"], "rotation": player_row["rotation"]},
+        "system_name": settings["system_name"],
+        "playlist": playlist,
+        "items": items,
+        "fallback_items": fallback,
+        "volume": int(settings.get("volume", 80)),
+        "standby": {"path": cfg.standby_path, "url": "/api/player/v1/standby", "sha256": st.standby_sha},
+    }
+    payload["revision"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    return payload
+
+
+def _player_from_token(conn):
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise ApiError(401, "Player-token ontbreekt.")
+    token_hash = hash_token(auth[7:].strip())
+    for row in conn.execute("SELECT * FROM players"):
+        if hmac.compare_digest(row["token_hash"], token_hash):
+            return row
+    raise ApiError(401, "Onbekend player-token.")
+
+
+def live_status(st, player_id):
+    with st.lock:
+        rec = st.live.get(player_id)
+    if not rec:
+        return None, False
+    return rec["status"], (time.time() - rec["received"]) < ONLINE_AFTER
+
+
+def player_to_json(conn, row, settings, st):
+    status, online = live_status(st, row["id"])
+    pid = effective_playlist_id(conn, row, settings)
+    pl = conn.execute("SELECT id, name FROM playlists WHERE id = ?", (pid,)).fetchone() if pid else None
+    last = None
+    with st.lock:
+        rec = st.live.get(row["id"])
+        if rec:
+            last = rec["received"]
+    return {
+        "id": row["id"], "name": row["name"], "kind": row["kind"], "display_name": row["display_name"],
+        "rotation": row["rotation"], "playlist_id": row["playlist_id"],
+        "follows_default": row["playlist_id"] is None,
+        "effective_playlist": dict(pl) if pl else None,
+        "online": online, "last_contact": last or row["last_seen"], "status": status,
+        "enabled": row["token_hash"] != "!disabled",
+    }
+
+
+def register(app):
+
+    # -- beheer ---------------------------------------------------------------
+    @app.get("/api/players")
+    def players_list():
+        st = state()
+        conn = get_db()
+        settings = db.get_settings(conn)
+        rows = conn.execute("SELECT * FROM players ORDER BY kind = 'remote', name").fetchall()
+        return jsonify(players=[player_to_json(conn, r, settings, st) for r in rows])
+
+    @app.post("/api/players")
+    def players_create():
+        name = re.sub(r"[\x00-\x1f\x7f]", "", str(body().get("name", ""))).strip()[:60]
+        if not name:
+            raise ApiError(400, "Geef de player een naam.")
+        token = secrets.token_urlsafe(32)
+        pid = uuid.uuid4().hex[:12]
+        get_db().execute(
+            "INSERT INTO players (id, name, kind, token_hash, created_at) VALUES (?, ?, 'remote', ?, ?)",
+            (pid, name, hash_token(token), db.now()))
+        log.info("Externe player '%s' geregistreerd.", name)
+        return jsonify(id=pid, token=token), 201
+
+    def _get_player(conn, player_id):
+        row = conn.execute("SELECT * FROM players WHERE id = ?", (player_id,)).fetchone()
+        if row is None:
+            raise ApiError(404, "Player niet gevonden.")
+        return row
+
+    @app.patch("/api/players/<player_id>")
+    def players_update(player_id):
+        conn = get_db()
+        row = _get_player(conn, player_id)
+        data = body()
+        name = re.sub(r"[\x00-\x1f\x7f]", "", str(data.get("name", row["name"]))).strip()[:60] or row["name"]
+        display = re.sub(r"[\x00-\x1f\x7f]", "", str(data.get("display_name", row["display_name"]))).strip()[:60]
+        rotation = data.get("rotation", row["rotation"])
+        try:
+            rotation = int(rotation)
+        except (TypeError, ValueError):
+            rotation = -1
+        if rotation not in (0, 90, 180, 270):
+            raise ApiError(400, "Rotatie moet 0, 90, 180 of 270 zijn.")
+        playlist_id = row["playlist_id"]
+        if "playlist_id" in data:
+            if data["playlist_id"] in (None, "", "default"):
+                playlist_id = None
+            else:
+                pl = get_playlist_row(conn, data["playlist_id"])
+                from .routes_playlists import playlist_problems
+                problems = playlist_problems(conn, state().cfg, pl["id"])
+                if problems:
+                    raise ApiError(422, "Playlist kan niet worden geactiveerd.", problems=problems)
+                playlist_id = pl["id"]
+        conn.execute("UPDATE players SET name = ?, display_name = ?, rotation = ?, playlist_id = ? WHERE id = ?",
+                     (name, display or "HDMI-scherm", rotation, playlist_id, row["id"]))
+        st = state()
+        return jsonify(player=player_to_json(conn, _get_player(conn, row["id"]), db.get_settings(conn), st))
+
+    @app.delete("/api/players/<player_id>")
+    def players_delete(player_id):
+        conn = get_db()
+        row = _get_player(conn, player_id)
+        if row["kind"] == "local":
+            raise ApiError(400, "De lokale player kan niet worden verwijderd.")
+        conn.execute("DELETE FROM players WHERE id = ?", (row["id"],))
+        with state().lock:
+            state().live.pop(row["id"], None)
+        return jsonify(ok=True)
+
+    @app.post("/api/players/<player_id>/token")
+    def players_new_token(player_id):
+        conn = get_db()
+        row = _get_player(conn, player_id)
+        if row["kind"] == "local":
+            raise ApiError(400, "Het token van de lokale player staat in /etc/signage/player.ini.")
+        token = secrets.token_urlsafe(32)
+        conn.execute("UPDATE players SET token_hash = ? WHERE id = ?", (hash_token(token), row["id"]))
+        return jsonify(token=token)
+
+    # -- endpoints voor players -------------------------------------------------
+    @app.get("/api/player/v1/config")
+    def player_config():
+        cfg = state().cfg
+        conn = get_db()
+        row = _player_from_token(conn)
+        payload = build_player_config(conn, cfg, row)
+        etag = '"%s"' % payload["revision"]
+        if request.headers.get("If-None-Match") == etag:
+            resp = app.response_class(status=304)
+            resp.headers["ETag"] = etag
+            return resp
+        resp = jsonify(payload)
+        resp.headers["ETag"] = etag
+        return resp
+
+    @app.post("/api/player/v1/heartbeat")
+    def player_heartbeat():
+        st = state()
+        conn = get_db()
+        row = _player_from_token(conn)
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ApiError(400, "Verwacht JSON.")
+        allowed = ("state", "current", "playlist_id", "revision", "mpv_restarts", "errors", "display",
+                   "version", "uptime", "message")
+        status = {k: data.get(k) for k in allowed if k in data}
+        if isinstance(status.get("errors"), list):
+            status["errors"] = [str(e)[:300] for e in status["errors"][-10:]]
+        now = time.time()
+        with st.lock:
+            was = st.live.get(row["id"])
+            st.live[row["id"]] = {"status": status, "received": now}
+            last_written = st.last_seen_written.get(row["id"], 0)
+            write = (now - last_written > LAST_SEEN_WRITE) or not was or (now - was["received"] > ONLINE_AFTER)
+            if write:
+                st.last_seen_written[row["id"]] = now
+        if write:
+            conn.execute("UPDATE players SET last_seen = ? WHERE id = ?", (now, row["id"]))
+        return jsonify(ok=True, server_version=__version__)
+
+    @app.get("/api/player/v1/media/<media_id>")
+    def player_media(media_id):
+        cfg = state().cfg
+        conn = get_db()
+        _player_from_token(conn)
+        if not re.match(r"^[0-9a-f]{32}$", media_id):
+            raise ApiError(404, "Niet gevonden.")
+        row = conn.execute("SELECT * FROM media WHERE id = ?", (media_id,)).fetchone()
+        if row is None:
+            raise ApiError(404, "Niet gevonden.")
+        path = media.media_paths(cfg, row)["playback"]
+        if not os.path.exists(path):
+            raise ApiError(404, "Bestand ontbreekt.")
+        return send_file(path, mimetype="application/octet-stream", conditional=True, max_age=0)
+
+    @app.get("/api/player/v1/standby")
+    def player_standby():
+        cfg = state().cfg
+        _player_from_token(get_db())
+        return send_file(cfg.standby_path, mimetype="image/png", max_age=0)

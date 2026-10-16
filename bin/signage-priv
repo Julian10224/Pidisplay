@@ -1,0 +1,166 @@
+#!/usr/bin/python3 -I
+"""signage-priv — beperkte systeemacties voor de signage-server.
+
+Wordt geïnstalleerd als /usr/local/sbin/signage-priv (eigenaar root, niet schrijfbaar
+voor de gebruiker 'signage') en via sudoers alleen voor de gebruiker 'signage'
+toegestaan. Elke actie valideert zijn argumenten streng; er kan geen willekeurig
+commando mee worden uitgevoerd.
+
+Exitcodes: 0 = gelukt, 2 = ongeldige invoer, 1 = actie mislukt.
+"""
+
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+
+DATA_DIR = "/var/lib/signage"
+BOOT_DIRS = ("/boot/firmware", "/boot")
+RESET_FLAGS = ("signage-reset-admin", "signage-reset-admin.txt")
+HOSTNAME_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)$")
+TIME_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def run(*cmd, check=True):
+    res = subprocess.run(list(cmd), capture_output=True, text=True, timeout=60)
+    if check and res.returncode != 0:
+        die((res.stderr or res.stdout or f"{cmd[0]} mislukt").strip())
+    return res
+
+
+def boot_tasks():
+    """Bij het starten van de server (als root): wachtwoordherstel via de SD-kaart."""
+    for d in BOOT_DIRS:
+        for flag in RESET_FLAGS:
+            path = os.path.join(d, flag)
+            if os.path.exists(path):
+                db = os.path.join(DATA_DIR, "signage.db")
+                if os.path.exists(db):
+                    conn = sqlite3.connect(db, timeout=15)
+                    conn.execute("DELETE FROM users")
+                    conn.commit()
+                    conn.close()
+                try:
+                    os.unlink(os.path.join(DATA_DIR, "setup_code"))
+                except FileNotFoundError:
+                    pass
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                print(f"Beheerder gewist via {path}; nieuwe setup-code verschijnt op het scherm.")
+    # Bestanden die per ongeluk als root zijn aangemaakt terugzetten naar 'signage'.
+    try:
+        import pwd
+        pw = pwd.getpwnam("signage")
+        for root, dirs, files in os.walk(DATA_DIR):
+            for name in dirs + files:
+                p = os.path.join(root, name)
+                st = os.lstat(p)
+                if st.st_uid == 0:
+                    os.lchown(p, pw.pw_uid, pw.pw_gid)
+    except (KeyError, OSError):
+        pass
+
+
+def set_hostname(name):
+    if not HOSTNAME_RE.match(name):
+        die("Ongeldige hostnaam.", 2)
+    old = os.uname().nodename
+    run("hostnamectl", "set-hostname", name)
+    # /etc/hosts bijwerken zoals raspi-config dat doet (127.0.1.1-regel).
+    try:
+        with open("/etc/hosts", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+        out, found = [], False
+        for line in lines:
+            parts = line.split()
+            if parts and parts[0] == "127.0.1.1":
+                out.append(f"127.0.1.1\t{name}")
+                found = True
+            else:
+                out.append(line)
+        if not found:
+            out.append(f"127.0.1.1\t{name}")
+        tmp = "/etc/hosts.signage-tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(out) + "\n")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, "/etc/hosts")
+    except OSError as exc:
+        die(f"Hostnaam gezet, maar /etc/hosts bijwerken mislukte: {exc}")
+    run("systemctl", "try-restart", "avahi-daemon.service", check=False)
+    print(f"Hostnaam gewijzigd van {old} naar {name}.")
+
+
+def set_timezone(tz):
+    zones = run("timedatectl", "list-timezones").stdout.split()
+    if tz not in zones:
+        die("Onbekende tijdzone.", 2)
+    run("timedatectl", "set-timezone", tz)
+
+
+def set_ntp(value):
+    if value not in ("on", "off"):
+        die("Gebruik on of off.", 2)
+    run("timedatectl", "set-ntp", "true" if value == "on" else "false")
+
+
+def set_time(value):
+    if not TIME_RE.match(value):
+        die("Ongeldig tijdformaat.", 2)
+    run("timedatectl", "set-ntp", "false")
+    run("timedatectl", "set-time", value)
+    if os.path.exists("/sbin/fake-hwclock") or os.path.exists("/usr/sbin/fake-hwclock"):
+        run("fake-hwclock", "save", "force", check=False)
+
+
+def player(action):
+    unit = "signage-player.service"
+    if action == "restart":
+        run("systemctl", "restart", unit)
+    elif action == "enable":
+        run("systemctl", "enable", "--now", unit)
+    elif action == "disable":
+        run("systemctl", "disable", "--now", unit)
+    else:
+        die("Ongeldige actie.", 2)
+
+
+def delayed(*cmd):
+    # Even wachten zodat het HTTP-antwoord nog verstuurd wordt.
+    run("systemd-run", "--quiet", "--on-active=2", "--timer-property=AccuracySec=100ms", *cmd)
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        die("signage-priv moet als root draaien (via sudo).")
+    if not argv:
+        die("Gebruik: signage-priv <actie> [argument]", 2)
+    action, args = argv[0], argv[1:]
+    table = {
+        "boot-tasks": (0, boot_tasks),
+        "set-hostname": (1, set_hostname),
+        "set-timezone": (1, set_timezone),
+        "set-ntp": (1, set_ntp),
+        "set-time": (1, set_time),
+        "player": (1, player),
+        "restart-server": (0, lambda: delayed("/usr/bin/systemctl", "restart", "signage-server.service")),
+        "reboot": (0, lambda: delayed("/usr/bin/systemctl", "reboot")),
+    }
+    if action not in table:
+        die("Onbekende actie.", 2)
+    nargs, fn = table[action]
+    if len(args) != nargs:
+        die("Verkeerd aantal argumenten.", 2)
+    fn(*args)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

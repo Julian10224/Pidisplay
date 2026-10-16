@@ -1,0 +1,28 @@
+[Unit]
+Description=Signage-server (beheerwebsite, API en media)
+Documentation=file:///opt/signage/current/README.md
+After=network.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=signage
+Group=signage
+Environment=PYTHONPATH=/opt/signage/current/app
+Environment=SIGNAGE_CONFIG=/etc/signage/signage.ini
+Environment=PYTHONUNBUFFERED=1
+# Als root: wachtwoordherstel via de SD-kaart en rechten van de gegevensmap controleren.
+ExecStartPre=+/usr/local/sbin/signage-priv boot-tasks
+ExecStart=/usr/bin/python3 -m signage.server
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+# Poort 80 zonder root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+UMask=0027
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

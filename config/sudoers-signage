@@ -1,0 +1,3 @@
+# Signage: de server mag alleen dit ene, root-eigen hulpprogramma uitvoeren.
+# Het programma controleert zelf alle argumenten.
+signage ALL=(root) NOPASSWD: /usr/local/sbin/signage-priv

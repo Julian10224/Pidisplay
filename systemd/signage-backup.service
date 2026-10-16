@@ -1,0 +1,14 @@
+[Unit]
+Description=Signage: automatische back-up (zonder media)
+After=signage-server.service
+
+[Service]
+Type=oneshot
+User=signage
+Group=signage
+Environment=PYTHONPATH=/opt/signage/current/app
+Environment=SIGNAGE_CONFIG=/etc/signage/signage.ini
+UMask=0027
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/usr/bin/python3 -m signage.cli backup --auto

@@ -1,0 +1,137 @@
+#!/usr/bin/python3
+"""Nagebootste systemctl voor installatietests zonder systemd als PID 1.
+
+Leest de unit-bestanden in /etc/systemd/system en start ExecStartPre (+ = root) en
+ExecStart als de juiste gebruiker met de opgegeven Environment-regels.
+Alleen voor tests; wordt NIET meegeleverd op de Pi.
+"""
+import os
+import signal
+import subprocess
+import sys
+import time
+
+STATE = "/run/shim"
+os.makedirs(STATE, exist_ok=True)
+LOG = os.path.join(STATE, "calls.log")
+with open(LOG, "a") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\n")
+
+args = [a for a in sys.argv[1:] if a not in ("--quiet", "--no-block", "-q", "--now", "--no-pager")]
+now_flag = "--now" in sys.argv
+
+
+def unit_name(u):
+    return u if "." in u else u + ".service"
+
+
+def parse(unit):
+    path = f"/etc/systemd/system/{unit}"
+    cfg = {"Environment": [], "ExecStartPre": []}
+    if not os.path.exists(path):
+        return None
+    for line in open(path):
+        line = line.strip()
+        if "=" not in line or line.startswith("#"):
+            continue
+        k, v = line.split("=", 1)
+        if k in ("Environment", "ExecStartPre"):
+            cfg[k].append(v)
+        else:
+            cfg[k] = v
+    return cfg
+
+
+def pidfile(unit):
+    return os.path.join(STATE, unit + ".pid")
+
+
+def alive(unit):
+    try:
+        pid = int(open(pidfile(unit)).read())
+        os.kill(pid, 0)
+        return pid
+    except (OSError, ValueError):
+        return None
+
+
+def stop(unit):
+    pid = alive(unit)
+    if pid:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        for _ in range(50):
+            if not alive(unit):
+                break
+            time.sleep(0.1)
+
+
+def start(unit):
+    cfg = parse(unit)
+    if cfg is None or "ExecStart" not in cfg:
+        return 0
+    user = cfg.get("User", "root")
+    env = dict(os.environ)
+    for e in cfg["Environment"]:
+        k, v = e.split("=", 1)
+        env[k] = v
+    if cfg.get("RuntimeDirectory"):
+        d = "/run/" + cfg["RuntimeDirectory"]
+        os.makedirs(d, exist_ok=True)
+        subprocess.run(["chown", f"{user}:{user}", d])
+        env["RUNTIME_DIRECTORY"] = d
+    for pre in cfg["ExecStartPre"]:
+        as_root = pre.startswith("+")
+        cmd = pre.lstrip("+").split()
+        if not as_root and user != "root":
+            cmd = ["runuser", "-u", user, "--"] + cmd
+        r = subprocess.run(cmd, env=env)
+        if r.returncode != 0:
+            print(f"ExecStartPre faalde voor {unit}", file=sys.stderr)
+            return 1
+    cmd = cfg["ExecStart"].split()
+    if user != "root":
+        envargs = [f"{k}={v}" for k, v in env.items() if k.startswith(("PYTHON", "SIGNAGE", "XDG", "RUNTIME", "FAKE"))]
+        cmd = ["runuser", "-u", user, "--", "env"] + envargs + cmd
+    log = open(os.path.join(STATE, unit + ".log"), "a")
+    if cfg.get("Type") == "oneshot":
+        return subprocess.run(cmd, env=env, stdout=log, stderr=log).returncode
+    p = subprocess.Popen(cmd, env=env, stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
+    open(pidfile(unit), "w").write(str(p.pid))
+    return 0
+
+
+verb = args[0] if args else ""
+units = [unit_name(u) for u in args[1:]]
+rc = 0
+if verb in ("start", "restart", "try-restart"):
+    for u in units:
+        if verb == "try-restart" and not alive(u):
+            continue
+        stop(u)
+        rc |= start(u)
+elif verb == "stop":
+    for u in units:
+        stop(u)
+elif verb == "enable":
+    if now_flag:
+        for u in units:
+            stop(u); rc |= start(u)
+elif verb == "disable":
+    if now_flag:
+        for u in units:
+            stop(u)
+elif verb == "is-active":
+    a = all(alive(u) for u in units)
+    if "--quiet" not in sys.argv:
+        print("active" if a else "inactive")
+    rc = 0 if a else 3
+elif verb == "is-enabled":
+    print("enabled")
+elif verb == "get-default":
+    print("multi-user.target")
+elif verb in ("daemon-reload", "list-unit-files", "set-default", "reboot"):
+    pass
+sys.exit(rc)

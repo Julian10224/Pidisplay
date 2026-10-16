@@ -1,0 +1,8 @@
+#!/bin/bash
+# Nagebootste timedatectl/hostnamectl voor tests: registreert aanroepen.
+echo "$(basename "$0") $*" >> /run/shim/calls.log
+case "$1" in
+    list-timezones) printf 'Europe/Amsterdam\nEurope/London\nUTC\n' ;;
+    show) printf 'Timezone=Europe/Amsterdam\nNTP=yes\nNTPSynchronized=no\n' ;;
+esac
+exit 0
