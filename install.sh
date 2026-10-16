@@ -4,6 +4,8 @@
 #
 #  Gebruik (vanaf de boot-partitie van de SD-kaart):
 #     sudo bash /boot/firmware/signage/install.sh
+#  Of via SSH, zonder iets op de SD-kaart te zetten (downloadt van GitHub, zie get.sh):
+#     curl -fsSL https://raw.githubusercontent.com/Julian10224/Pidisplay/main/get.sh | sudo bash
 #
 #  Opties:
 #     --role all|server|player   Wat installeren (standaard: all = server + player)

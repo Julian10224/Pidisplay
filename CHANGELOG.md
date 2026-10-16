@@ -1,5 +1,16 @@
 # Wijzigingen
 
+## 1.3.1 — installeren en updaten via SSH, zonder SD-kaart
+
+- Nieuw `get.sh`: installeren of updaten met één opdracht via SSH, zonder iets op de
+  SD-kaart te zetten:
+  `curl -fsSL https://raw.githubusercontent.com/Julian10224/Pidisplay/main/get.sh | sudo bash`.
+  Het script downloadt de broncode van GitHub naar een tijdelijke map, controleert dat het een
+  Signage-pakket is en start `install.sh` (opties achter `-s --`, versie kiezen met `--ref`).
+  Alles staat in één functie, zodat een afgebroken download nooit half wordt uitgevoerd.
+- De beheerwebsite toont bij *Externe player toevoegen* nu ook deze opdracht.
+- README §1, §11 en §12 bijgewerkt. Verder geen wijzigingen aan server of player.
+
 ## 1.3.0 — live bediening: het scherm vanuit de website door de playlist laten klikken
 
 Nieuw:

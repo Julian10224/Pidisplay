@@ -1312,7 +1312,9 @@ function PlayersPage() {
       onSubmit=${async (v) => { const r = await api('POST', '/api/players', { name: v }); setToken({ name: v, token: r.token }); await load(); }} />`}
     ${token && html`<${Modal} title=${'Token voor ' + token.name} onClose=${() => setToken(null)}
         footer=${html`<button class="btn primary" onClick=${() => setToken(null)}>Klaar</button>`}>
-      <p>Dit token wordt maar één keer getoond. Installeer op de andere Raspberry Pi alleen de player:</p>
+      <p>Dit token wordt maar één keer getoond. Installeer op de andere Raspberry Pi (via SSH, met internet) alleen de player:</p>
+      <div class="token-box">curl -fsSL https://raw.githubusercontent.com/Julian10224/Pidisplay/main/get.sh | sudo bash -s -- --role player --server ${serverUrl} --token ${token.token}</div>
+      <p class="muted small">Of, met de map <code>signage</code> op de SD-kaart:</p>
       <div class="token-box">sudo bash /boot/firmware/signage/install.sh --role player --server ${serverUrl} --token ${token.token}</div>
       <p class="muted small">De externe player downloadt de media naar zijn eigen SD-kaart en blijft afspelen als de verbinding wegvalt.</p>
     </${Modal}>`}

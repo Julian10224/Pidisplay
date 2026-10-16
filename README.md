@@ -60,7 +60,33 @@ Versie: zie `VERSION`. Wijzigingen per versie: `CHANGELOG.md`. Controle per eis:
    - **SSH inschakelen**.
 4. Flash de kaart.
 
-### Stap 2 — Het pakket op de SD-kaart zetten
+### Snelste weg: alles via SSH (niets op de SD-kaart zetten)
+
+Stop de geflashte kaart in de Pi, sluit scherm en netwerk aan en zet de Pi aan (de eerste
+start duurt een paar minuten). Log daarna in via SSH en geef één opdracht:
+
+```bash
+ssh <gebruikersnaam>@signage.local
+curl -fsSL https://raw.githubusercontent.com/Julian10224/Pidisplay/main/get.sh | sudo bash
+```
+
+`get.sh` downloadt de nieuwste versie van GitHub naar een tijdelijke map, controleert dat het
+een Signage-pakket is en start daarna `install.sh` (zie stap 3 voor wat dat doet). De Pi heeft
+hiervoor internet nodig, maar dat is bij de eerste installatie toch al zo. Opties van
+`install.sh` zet je achter `-s --`, bijvoorbeeld zonder browserweergave:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Julian10224/Pidisplay/main/get.sh | sudo bash -s -- --no-browser
+```
+
+Een bepaalde versie of commit in plaats van de nieuwste: `… | sudo bash -s -- --ref <tag of commit>`.
+Ga daarna verder met **stap 4**; stap 2 en 3 kun je overslaan. De setup-code staat ook in de
+uitvoer van het script, en is altijd op te vragen met `sudo signage-admin setup-code`.
+
+Liever eerst lezen wat het script doet? `curl -fsSL https://raw.githubusercontent.com/Julian10224/Pidisplay/main/get.sh -o get.sh`, bekijk het bestand
+met `less get.sh` en start het met `sudo bash get.sh`.
+
+### Stap 2 — Het pakket op de SD-kaart zetten (zonder internet op de Pi bij het kopiëren)
 
 1. Haal de kaart uit de computer en stop hem er opnieuw in. Er verschijnt een schijf
    **bootfs**.
@@ -432,6 +458,14 @@ sudo signage-admin restore /pad/naar/signage-backup-....tar.gz
 
 ## 11. Updaten en terugdraaien
 
+Via SSH, met internet op de Pi (zelfde opdracht als bij de installatie):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Julian10224/Pidisplay/main/get.sh | sudo bash
+```
+
+Of zonder internet op de Pi:
+
 1. Kopieer de nieuwe map `signage` naar de Pi (via de SD-kaart of `scp`).
 2. `sudo bash /boot/firmware/signage/install.sh`
 
@@ -463,8 +497,10 @@ De architectuur ondersteunt meerdere players: *Schermen → Externe player toevo
 token en de installatieopdracht voor een tweede Pi:
 
 ```bash
-sudo bash /boot/firmware/signage/install.sh --role player --server http://<ip-van-de-server> --token <token>
+curl -fsSL https://raw.githubusercontent.com/Julian10224/Pidisplay/main/get.sh | sudo bash -s -- --role player --server http://<ip-van-de-server> --token <token>
 ```
+
+(Of met de map op de SD-kaart: `sudo bash /boot/firmware/signage/install.sh --role player …`.)
 
 Een externe player downloadt de media en HTML-projecten naar zijn eigen SD-kaart (met
 SHA-256-controle), speelt door als het netwerk wegvalt en volgt de standaardplaylist of een
