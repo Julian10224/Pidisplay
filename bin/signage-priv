@@ -166,6 +166,21 @@ def set_renderer(value):
     run("systemctl", "restart", "signage-player.service")
 
 
+def update():
+    """Software bijwerken vanaf GitHub (bron vast in /etc/signage/signage.ini, [update]).
+
+    Draait als losse systemd-unit, zodat de update doorloopt terwijl install.sh de server
+    herstart. Voortgang: /var/lib/signage/update/status.json."""
+    script = "/opt/signage/current/bin/signage-update"
+    if not os.path.isfile(script):
+        die("Het updateprogramma ontbreekt in deze versie; update eenmalig via SSH.")
+    if run("systemctl", "is-active", "--quiet", "signage-update.service", check=False).returncode == 0:
+        die("Er loopt al een update.")
+    run("systemd-run", "--quiet", "--collect", "--unit=signage-update",
+        "--description=Signage bijwerken", "/bin/bash", script)
+    print("Update gestart.")
+
+
 def delayed(*cmd):
     # Even wachten zodat het HTTP-antwoord nog verstuurd wordt.
     run("systemd-run", "--quiet", "--on-active=2", "--timer-property=AccuracySec=100ms", *cmd)
@@ -185,6 +200,7 @@ def main(argv):
         "set-time": (1, set_time),
         "player": (1, player),
         "set-renderer": (1, set_renderer),
+        "update": (0, update),
         "restart-server": (0, lambda: delayed("/usr/bin/systemctl", "restart", "signage-server.service")),
         "reboot": (0, lambda: delayed("/usr/bin/systemctl", "reboot")),
     }

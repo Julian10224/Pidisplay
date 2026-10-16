@@ -1,5 +1,31 @@
 # Wijzigingen
 
+## 1.3.2 — software bijwerken met een knop, foutmelding van de browserweergave
+
+Nieuw:
+
+- **Software bijwerken** onder *Instellingen → Software bijwerken*: controleren op een nieuwere
+  versie (met wat er nieuw is), en met één knop bijwerken. De update draait als root in een eigen
+  systemd-unit (`bin/signage-update`, gestart via `signage-priv`), zodat hij doorloopt terwijl de
+  server herstart; de pagina volgt de voortgang en laadt zichzelf opnieuw. Ook via SSH:
+  `sudo signage-admin update`. Bron vast in `/etc/signage/signage.ini` (`[update]`).
+- **Foutmelding van de browserweergave**: start de browserweergave te snel niet, dan bewaart
+  `signage-player-launch` de laatste uitvoer van cage, Chromium en de player plus sessie-, scherm-
+  en geheugeninformatie. *Instellingen → Weergave* toont die tekst, zodat de oorzaak zonder SSH te
+  zien is. De uitvoer gaat daarnaast nog steeds naar het systeemlogboek.
+- **install.sh onthoudt de opties** van de eerste installatie in `/etc/signage/install.conf`, zodat
+  een update (knop, `get.sh` of opnieuw `install.sh`) een losse player niet ineens tot server maakt
+  en `--no-browser`, `--no-watchdog` en `--no-gpu-mem` blijven gelden.
+
+Opgelost:
+
+- Willekeurige volgorde: wie willekeurig aanzette terwijl de playlist speelde en daarna de live
+  bediening gebruikte, kreeg een eerste ronde waarin items ontbraken. De nieuwe ronde begint nu
+  met het huidige item.
+- Dashboard: de teller bij willekeurige volgorde telde de plaats in de geschudde ronde
+  (1, 2, 3 …), waardoor het leek alsof de playlist op volgorde speelde. Nu staat er welk item uit
+  de playlist speelt (*willekeurig · item 4 van 6*); op *Schermen* staat *willekeurige volgorde*.
+
 ## 1.3.1 — installeren en updaten via SSH, zonder SD-kaart
 
 - Nieuw `get.sh`: installeren of updaten met één opdracht via SSH, zonder iets op de

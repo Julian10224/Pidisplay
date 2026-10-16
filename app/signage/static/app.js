@@ -384,6 +384,16 @@ function LiveControls({ player, ctl, hint }) {
   </div>`;
 }
 
+/* Positie van het huidige item. Bij willekeurige volgorde de plaats in de playlist (zoals in
+   de filmstrip), niet de plaats in de geschudde ronde: die telt altijd 1, 2, 3… op en wekt
+   zo de indruk dat de playlist op volgorde speelt. */
+function livePosition(cur, strip) {
+  const shuffle = cur.shuffle != null ? cur.shuffle : !!(strip && strip.shuffle);
+  if (!shuffle) return `${cur.index + 1} / ${cur.total}`;
+  const pos = strip && cur.item_id != null ? strip.items.findIndex((it) => it.item_id === cur.item_id) : -1;
+  return pos >= 0 ? `willekeurig · item ${pos + 1} van ${strip.items.length}` : 'willekeurige volgorde';
+}
+
 function Dashboard() {
   const [st, setSt] = useState(null);
   const [playlists, setPlaylists] = useState([]);
@@ -463,7 +473,7 @@ function Dashboard() {
         <div class="monitor-bar">
           <span class=${'tally' + (cur ? '' : ' off')}><span class="dot"></span>${cur ? 'Op het scherm' : standby ? 'Standby' : 'Geen beeld'}</span>
           <span class="spacer"></span>
-          ${cur && html`<span>${strip && strip.shuffle ? 'willekeurig · ' : ''}${cur.index + 1} / ${cur.total}</span>`}
+          ${cur && html`<span>${livePosition(cur, strip)}</span>`}
         </div>
         ${strip && strip.items.length > 0 && html`<div class="filmstrip" aria-label="Volgorde in de playlist">
           ${strip.items.map((it, i) => {
@@ -1282,7 +1292,7 @@ function PlayersPage() {
             <button class="btn ghost small" onClick=${() => setRenaming(p)}><${Icon} name="edit" />Naam</button></div>
           <dl class="facts">
             <dt>Laatste contact</dt><dd>${fmtAgo(p.last_contact)}</dd>
-            <dt>Nu</dt><dd>${cur ? `${cur.name} (${cur.index + 1}/${cur.total})` : s.state === 'standby' ? 'Standby-scherm' : '–'}</dd>
+            <dt>Nu</dt><dd>${cur ? `${cur.name} (${cur.shuffle ? 'willekeurige volgorde' : `${cur.index + 1}/${cur.total}`})` : s.state === 'standby' ? 'Standby-scherm' : '–'}</dd>
             <dt>Scherm</dt><dd>${displays.length ? displays.map((d) => html`<div>${d.connector}: ${d.connected ? `aangesloten${d.mode ? `, ${d.mode}` : ''}` : 'niet aangesloten'}</div>`) : 'onbekend'}</dd>
             ${s.version && html`<dt>Player</dt><dd>versie ${s.version}${s.mpv_restarts ? ` · ${s.mpv_restarts}× herstart` : ''}</dd>`}
             ${s.renderer && html`<dt>Weergave</dt><dd>${rendererText(s)}</dd>`}
@@ -1328,6 +1338,89 @@ function PlayersPage() {
 // ---------------------------------------------------------------------------
 function Section({ id, title, note, children }) {
   return html`<section class="panel" id=${id}><h2>${title}</h2>${note && html`<p class="section-note" style="margin-top:4px">${note}</p>`}${children}</section>`;
+}
+
+/* Software bijwerken vanaf GitHub. Tijdens de update herstart de server; deze sectie blijft
+   de status opvragen en laadt de pagina opnieuw zodra de nieuwe versie draait. */
+function UpdateSection() {
+  const [u, setU] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [watch, setWatch] = useState(null);       // { since } zolang we een update volgen
+  const [away, setAway] = useState(false);        // server even niet bereikbaar (herstart)
+  const load = async () => { const r = await api('GET', '/api/system/update'); setU(r); setAway(false); return r; };
+  useEffect(() => { load().catch(() => {}); }, []);
+  const status = u && u.status;
+  const running = !!(status && status.state === 'running');
+  useEffect(() => {
+    if (!watch && !running) return undefined;
+    let alive = true, timer;
+    const tick = async () => {
+      if (!alive) return;
+      try {
+        const r = await load();
+        const st = r.status || {};
+        const ours = watch && st.started >= watch.since - 5;
+        if (ours && st.state === 'done' && r.current === st.to) {
+          toast(`Bijgewerkt naar ${r.current}. De pagina wordt opnieuw geladen.`);
+          setTimeout(() => location.reload(), 2500);
+          return;
+        }
+        if (ours && (st.state === 'failed' || st.state === 'interrupted')) { setWatch(null); return; }
+        if (!watch && st.state !== 'running') return;
+      } catch (e) { if (alive) setAway(true); }
+      if (alive) timer = setTimeout(tick, 2000);
+    };
+    timer = setTimeout(tick, 1500);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [!!watch, running]);
+
+  const check = async () => {
+    setChecking(true);
+    try { const r = await api('POST', '/api/system/update/check'); setU({ ...u, check: r.check }); }
+    catch (e) { fail(e); } finally { setChecking(false); }
+  };
+  const start = async () => {
+    const c = u.check;
+    if (!await confirmDialog({ title: `Bijwerken naar ${c.latest}?`, confirm: 'Nu bijwerken',
+      body: html`<p>De nieuwe versie wordt van GitHub gedownload en geïnstalleerd. De website en het scherm zijn
+        daarbij een paar minuten niet bereikbaar (langer als er systeempakketten bij moeten). Playlists, media en
+        instellingen blijven behouden.</p>` })) return;
+    try {
+      await api('POST', '/api/system/update');
+      setWatch({ since: Date.now() / 1000 });
+      setU({ ...u, status: { state: 'running', message: 'Update gestart…', started: Date.now() / 1000 }, log: '' });
+    } catch (e) { fail(e); }
+  };
+
+  if (!u) return html`<${Section} id="update" title="Software bijwerken"><p class="muted">Laden…</p></${Section}>`;
+  const c = u.check;
+  const busyNow = running || !!watch;
+  const failed = status && (status.state === 'failed' || status.state === 'interrupted');
+  return html`<${Section} id="update" title="Software bijwerken"
+      note=${`Nieuwe versies komen van GitHub (${u.repo}, ${u.branch}). Playlists, media en instellingen blijven behouden.`}>
+    <dl class="facts" style="margin-bottom:14px">
+      <dt>Geïnstalleerde versie</dt><dd>${u.current}</dd>
+      ${c && html`<dt>Nieuwste versie</dt><dd>${c.latest} ${c.newer ? html`<span class="badge ok">nieuw</span>` : html`<span class="muted small">(geïnstalleerd)</span>`}</dd>`}
+      ${status && status.state === 'done' && !busyNow && html`<dt>Laatste update</dt><dd>${status.from} → ${status.to}, ${fmtDate(status.updated)}</dd>`}
+    </dl>
+    ${!u.enabled && html`<div class="notice warning"><${Icon} name="alert" /><span>Bijwerken via de website staat uit (<code>[update]</code> in signage.ini).</span></div>`}
+    ${busyNow && html`<div class="notice" role="status"><${Icon} name="refresh" /><span>${away
+      ? 'De server herstart met de nieuwe versie…'
+      : (status && status.state === 'running' && (!watch || status.started >= watch.since - 5) && status.message) || 'Update gestart…'}
+      Laat deze pagina open; hij wordt vanzelf opnieuw geladen.</span></div>`}
+    ${failed && !busyNow && html`<div class="notice error" role="alert"><${Icon} name="alert" /><span>${status.message}</span></div>`}
+    ${c && c.newer && c.notes && html`<details open style="margin:10px 0"><summary class="small">Wat is er nieuw</summary>
+      <div class="log-view" style="margin-top:8px;white-space:pre-wrap">${c.notes}</div></details>`}
+    <div class="row" style="margin-top:12px">
+      <button class="btn" disabled=${checking || busyNow || !u.enabled} onClick=${check}><${Icon} name="refresh" />${checking ? 'Controleren…' : 'Controleren op updates'}</button>
+      ${c && c.newer && html`<button class="btn primary" disabled=${busyNow || !u.enabled || !u.priv_available} onClick=${start}><${Icon} name="download" />Bijwerken naar ${c.latest}</button>`}
+      ${c && !c.newer && !busyNow && html`<span class="muted small">Je hebt de nieuwste versie.</span>`}
+    </div>
+    <p class="muted small" style="margin-top:10px">Mislukt een update, dan blijft de werkende versie actief of zet je de vorige terug met <code>sudo signage-admin rollback</code>.
+      Externe players werk je apart bij (via SSH: zie de README).</p>
+    ${u.log && html`<details open=${failed} style="margin-top:10px"><summary class="small">Logboek van de laatste update</summary>
+      <div class="log-view" style="margin-top:8px">${u.log}</div></details>`}
+  </${Section}>`;
 }
 
 function SettingsPage({ user, onLogout }) {
@@ -1399,7 +1492,7 @@ function SettingsPage({ user, onLogout }) {
     <div class="settings">
       <nav class="settings-nav" aria-label="Onderdelen">
         ${[['algemeen', 'Algemeen'], ['weergave', 'Weergave'], ['netwerk', 'Netwerk'], ['tijd', 'Tijd'], ['backup', 'Back-up'],
-          ['logboek', 'Logboeken'], ['systeem', 'Systeem'], ['account', 'Account']].map(([k, v]) =>
+          ['logboek', 'Logboeken'], ['update', 'Bijwerken'], ['systeem', 'Systeem'], ['account', 'Account']].map(([k, v]) =>
           html`<a href=${'#/instellingen'} onClick=${(e) => { e.preventDefault(); document.getElementById(k).scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>${v}</a>`)}
       </nav>
       <div class="stack">
@@ -1450,7 +1543,11 @@ function SettingsPage({ user, onLogout }) {
                   onClick=${() => run('renderer', async () => { const r = await api('POST', '/api/system/renderer', { renderer: 'reset' }); setInfo({ ...info, renderer: r.renderer }); }, 'Browserweergave wordt opnieuw geprobeerd.')}>Browserweergave opnieuw proberen</button>`}
               </div>
               ${!info.renderer.browser_installed && html`<p class="muted small">De browserweergave (Chromium en cage) is niet geïnstalleerd; de player gebruikt mpv. Installeer opnieuw zonder <code>--no-browser</code> om HTML te kunnen tonen.</p>`}
-              ${info.renderer.fallback_active && html`<div class="notice warning"><${Icon} name="alert" /><span>De browserweergave startte drie keer niet; de player is automatisch overgeschakeld op mpv. HTML-pagina's worden overgeslagen. Bekijk het logboek en probeer het opnieuw.</span></div>`}
+              ${info.renderer.fallback_active && html`<div class="notice warning"><${Icon} name="alert" /><span>De browserweergave startte drie keer niet; de player is automatisch overgeschakeld op mpv. HTML-pagina's worden overgeslagen. Hieronder staat de foutmelding van de laatste poging. Los de oorzaak op (of werk de software bij) en kies daarna <b>Browserweergave opnieuw proberen</b>.</span></div>`}
+              ${info.renderer.last_failure && html`<details open=${info.renderer.fallback_active}>
+                <summary class="small">Foutmelding van de laatste mislukte start van de browserweergave (${fmtDate(info.renderer.last_failure_at)})</summary>
+                <div class="log-view" style="margin-top:8px">${info.renderer.last_failure}</div>
+                <p class="muted small">Vraag je hulp bij dit probleem, kopieer dan deze tekst.</p></details>`}
             </div>`}
           </fieldset>
           <dl class="facts" style="margin-bottom:14px"><dt>Player</dt><dd>${info.player_service.active ? html`<span class="badge ok">actief</span>` : html`<span class="badge alert">gestopt</span>`}</dd>
@@ -1533,6 +1630,8 @@ function SettingsPage({ user, onLogout }) {
             <button class="btn" onClick=${() => loadLog().catch(fail)}><${Icon} name="refresh" />Vernieuwen</button></div>
           <div class="log-view" tabindex="0" aria-label="Logboek">${log || 'Geen regels.'}</div>
         </${Section}>
+
+        <${UpdateSection} />
 
         <${Section} id="systeem" title="Systeem">
           <dl class="facts" style="margin-bottom:14px">

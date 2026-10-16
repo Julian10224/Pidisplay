@@ -690,3 +690,24 @@ def test_live_control_end_to_end_browser_renderer(tmp_path, browser):
         page.close()
         t.join(5)
         srv.close()
+
+
+def test_live_next_keeps_shuffle_rounds(rig):
+    names = ["portrait.png", "small.png", "landscape.jpg", "standby.png", "logo.png"]
+    rig.write([rig.item("image", n, duration=30, item_id=100 + i) for i, n in enumerate(names)], shuffle=True)
+    rig.start()
+    end = time.time() + 10
+    while not _names(rig) and time.time() < end:
+        time.sleep(0.1)
+    for _ in range(14):
+        n = len(_names(rig))
+        rig.cmd("next")
+        e = time.time() + 5
+        while len(_names(rig)) <= n and time.time() < e:
+            time.sleep(0.03)
+    seq = _names(rig)
+    rounds = [seq[i:i + 5] for i in range(0, 15, 5)]
+    assert all(sorted(r) == sorted(names) for r in rounds), rounds
+    assert sum(r == names for r in rounds) <= 1, rounds
+    assert rig.js("window.__signage.snapshot()")["current"]["shuffle"] is True
+    assert rig.probe()["blank"] == 0

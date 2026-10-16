@@ -458,6 +458,23 @@ sudo signage-admin restore /pad/naar/signage-backup-....tar.gz
 
 ## 11. Updaten en terugdraaien
 
+**Met een knop in de beheerwebsite** (vanaf 1.3.2, internet op de Pi nodig): *Instellingen →
+Software bijwerken → Controleren op updates*. Is er een nieuwere versie, dan zie je wat er nieuw
+is en de knop *Bijwerken naar …*. De Pi downloadt de nieuwe versie van GitHub en installeert die
+met hetzelfde installatiescript; de website en het scherm zijn daarbij een paar minuten niet
+bereikbaar. De pagina volgt de voortgang en laadt zichzelf opnieuw zodra de nieuwe versie draait.
+Het logboek van de laatste update staat eronder. Hetzelfde kan via SSH met `sudo signage-admin update`.
+
+- De bron staat in `/etc/signage/signage.ini`, sectie `[update]` (`repo`, `branch`, `enabled`).
+  Alleen root kan dat bestand wijzigen; de website kan de bron dus niet veranderen.
+  `enabled = false` zet de knop uit.
+- Een update gebruikt de opties van de eerste installatie (rol, `--no-browser`, watchdog,
+  `gpu_mem`), die in `/etc/signage/install.conf` staan. Een losse player blijft dus een losse
+  player. Een installatie van vóór 1.3.2 leidt die opties af uit wat er al geïnstalleerd is en
+  voert bij een update geen nieuwe systeemwijzigingen (watchdog, `config.txt`) door.
+- Externe players werk je apart bij met de SSH-opdracht hieronder.
+- 1.3.1 en ouder hebben deze knop nog niet: werk die eenmalig bij via SSH.
+
 Via SSH, met internet op de Pi (zelfde opdracht als bij de installatie):
 
 ```bash
@@ -581,7 +598,7 @@ journalctl -u signage-player -n 100
 | Symptoom | Oorzaak / oplossing |
 |---|---|
 | Zwart scherm | Scherm uit tijdens het opstarten, of er draait een desktop. Gebruik Lite, of installeer met `--disable-desktop`. Bekijk `journalctl -u signage-player`. |
-| Dashboard: "teruggevallen op mpv" | De browserweergave startte niet. Bekijk het logboek, los het op en voer `sudo signage-admin renderer reset` uit. |
+| "De browserweergave startte drie keer niet" | Onder *Instellingen → Weergave* staat de foutmelding van de laatste poging: de laatste regels van cage, Chromium en de player, plus sessie-, scherm- en geheugeninformatie (ook in `/var/lib/signage/player/browser-last-failure.log`). Los de oorzaak op en kies *Browserweergave opnieuw proberen* (of `sudo signage-admin renderer reset`). |
 | HTML-items worden overgeslagen | De mpv-weergave is actief (zie hierboven), of de pagina ontbreekt. |
 | Scherm wordt niet herkend als het later aangaat | Voeg aan het einde van de regel in `bootfs/cmdline.txt` toe: ` video=HDMI-A-1:1920x1080@60D` en herstart. |
 | Video hapert | Controleer het formaat (§5) en het dashboard (overgeslagen frames). Probeer 720p, of `sudo signage-admin renderer mpv`. |

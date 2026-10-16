@@ -145,6 +145,7 @@ class MpvRenderer:
                              else cur.get("name"),
                              "kind": cur.get("kind"), "index": self.index, "total": len(self.items),
                              "item_id": cur.get("item_id"),
+                             "shuffle": self._shuffle(self.cfg, self.fallback_active),
                              "transition": self.state == "PLAYING_TRANSITION"}
                             if cur and (showing or self.state == "PLAYING_TRANSITION") else None),
                 "playlist_id": playlist.get("id"),
@@ -529,6 +530,11 @@ class MpvRenderer:
         self.items = self._round(base, True) if self._shuffle(new, False) else list(base)
         self.index = next((i for i, it in enumerate(self.items)
                            if it.get("item_id") is not None and it.get("item_id") == cur.get("item_id")), -1)
+        if self.index > 0 and self._shuffle(new, False):
+            # Nieuwe willekeurige ronde die met het huidige item begint: alle andere items
+            # volgen daarna nog in deze ronde (anders zou een deel van de ronde wegvallen).
+            self.items[0], self.items[self.index] = self.items[self.index], self.items[0]
+            self.index = 0
         self.fallback_active = False
         self.played = []
 

@@ -585,6 +585,11 @@ function adoptPending() {
   const base = conf.items || [];
   items = isShuffle(conf, false) ? shuffled(base, cur ? cur.media_id : null) : base.slice();
   index = cur ? items.findIndex((it) => it.item_id != null && it.item_id === cur.item_id) : -1;
+  if (index > 0 && isShuffle(conf, false)) {
+    // Nieuwe willekeurige ronde die met het huidige item begint: de andere items volgen nog.
+    [items[0], items[index]] = [items[index], items[0]];
+    index = 0;
+  }
   fallbackActive = false;
   played = [];
 }
@@ -699,6 +704,7 @@ function snapshot() {
       name: state === S.PLAYING_TRANSITION ? 'Overgang: ' + (activeTransition && activeTransition.name || '') : cur.name,
       kind: cur.kind, index, total: items.length, transition: state === S.PLAYING_TRANSITION,
       item_id: cur.item_id == null ? null : cur.item_id,
+      shuffle: isShuffle(cfg, fallbackActive),
     } : null,
     control: { v: 1, last: lastControl },
     errors: errors.slice(),
