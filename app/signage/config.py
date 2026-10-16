@@ -188,6 +188,7 @@ def read_player_config(path):
         "gpu_context": "drm",
         "audio_device": "auto",
         "extra_args": "",
+        "render_quality": "fast",
         "poll_interval": "5",
         "heartbeat_interval": "15",
         "renderer": "auto",

@@ -206,6 +206,8 @@ def create_app(cfg=None, start_background=True):
     )
     st = State(cfg)
     app.extensions["signage"] = st
+    from .videoopt import Optimizer
+    st.optimizer = Optimizer(cfg)   # zware video's omzetten naar een afspeelversie voor de Pi
 
     _sync_local_player(cfg)
     try:
@@ -400,6 +402,7 @@ def create_app(cfg=None, start_background=True):
     if start_background:
         threading.Thread(target=_background_loop, args=(st,), daemon=True, name="signage-bg").start()
         threading.Thread(target=regenerate_renditions, args=(cfg,), daemon=True, name="signage-rend").start()
+        st.optimizer.start()
     else:
         regenerate_renditions(cfg)
     return app

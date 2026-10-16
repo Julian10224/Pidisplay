@@ -1,5 +1,35 @@
 # Wijzigingen
 
+## 1.5.0 — vloeiender video's, en het opstarten weer snel
+
+Opgelost:
+
+- **Opstarten duurde na 1.4.0 heel lang** (logo bleef staan terwijl de website al werkte): de
+  nieuwe volgorde van de player-service ten opzichte van het opstartscherm liet de player wachten
+  op de inlogprompt, die zelf op het einde van het opstartscherm wachtte. De player-service heeft
+  weer precies de volgorde van 1.3.2; het logo blijft nu staan via een drop-in voor
+  `plymouth-quit.service` (`plymouth quit --retain-splash`).
+- **Haperende video's in de mpv-weergave**: mpv schaalt nu met lichte filters (bilineair, geen
+  dithering, geen lineair/sigmoid schalen, geen debanding). Nieuwere mpv-versies (0.37+, Raspberry Pi
+  OS Trixie) gebruiken standaard zware filters die de Pi 3B+ bij 1080p niet bijhoudt.
+  Instelbaar met `render_quality` in `player.ini`.
+
+Nieuw:
+
+- **Video's automatisch geschikt maken voor de Pi**: HEVC, 4K, 50/60 fps, 10-bit, interlaced of een
+  bitrate boven 20 Mbit/s krijgen op de achtergrond een afspeelversie (H.264 High, ≤1920×1080,
+  ≤30 fps, ≤8 Mbit/s, AAC). Eerst de hardware-encoder van de Pi, anders libx264; lage voorrang;
+  het resultaat wordt gecontroleerd (codec, afmetingen, duur). Origineel blijft bewaard. Voortgang en
+  resultaat bij *Media*, aan/uit onder *Instellingen → Weergave*. Bestaande video's worden na de update
+  ook bekeken. API: `POST /api/media/<id>/optimize`; `GET /api/media` geeft `optimize` en `optimized`.
+- **Overgeslagen videoframes in de mpv-weergave** worden gemeten en op het dashboard getoond (net als
+  in de browserweergave).
+- Foutmelding van de browserweergave: de diagnose wacht nog maar 5 s op `chromium --version`.
+
+Tests: 122 automatische tests (nieuw: `test_videoopt.py` met de echte ffmpeg — 60 fps, HEVC, 4K,
+staande telefoonvideo met rotatie; framemeting in de mpv-weergave). Op het geïnstalleerde systeem:
+omzetten met voortgang in de website. Niet op de Pi zelf gemeten.
+
 ## 1.4.0 — opstartscherm met logo en laadbalk
 
 - **Opstartscherm**: tijdens het opstarten staat er een logo in het midden met een laadbalk

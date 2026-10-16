@@ -30,6 +30,8 @@ if [ -d /usr/share/plymouth/themes/signage ]; then
     command -v update-initramfs >/dev/null && ls "$BOOT_DIR"/initramfs* >/dev/null 2>&1 && update-initramfs -u >/dev/null 2>&1 || true
     echo "Opstartscherm verwijderd."
 fi
+rm -f /etc/systemd/system/plymouth-quit.service.d/signage.conf
+systemctl daemon-reload
 rm -f /etc/sudoers.d/signage /usr/local/sbin/signage-priv /usr/local/bin/signage-admin /etc/pam.d/signage-player
 rm -f /etc/systemd/journald.conf.d/signage.conf /etc/systemd/system.conf.d/signage-watchdog.conf
 rm -rf /opt/signage

@@ -1,6 +1,6 @@
 # Controle van de code tegen beide opdrachten
 
-Versie 1.4.0. Per eis: waar het in de code zit en hoe het is gecontroleerd.
+Versie 1.5.0. Per eis: waar het in de code zit en hoe het is gecontroleerd.
 
 **Legenda**
 
@@ -154,6 +154,8 @@ staat als 🟡 en is opgenomen in de checklist in README §17.
 | Willekeurige volgorde blijft willekeurig bij de live bediening | ✅ | niet te reproduceren als volgorde van de playlist (gemeten in beide weergaven en via de server); wel twee verwarrende punten opgelost: dashboardteller en onvolledige eerste ronde na aanzetten tijdens afspelen; tests in `test_v13.py` en browsertest |
 | Software bijwerken met een knop in de website | ✅ | `routes_update.py`, `bin/signage-update`, `signage-priv update`; getest op het geïnstalleerde systeem: knop → download van GitHub → installatie → herstart → pagina laadt 1.3.2 (± 18 s, zonder nieuwe pakketten) |
 | Logo in het midden met laadbalk bij het opstarten | ✅ / 🟡 | Plymouth-thema via `signage-priv splash`, eigen logo onder *Instellingen → Opstartscherm*; gerenderd met Plymouth op een virtueel scherm (0°/90°); `test_splash.py`; **niet op de Pi bekeken** |
+| Haperende video's verbeteren | ✅ / 🟡 | lichte mpv-schaling (`FAST_RENDER`), automatische afspeelversie voor zware video's (`videoopt.py`, getest met echte ffmpeg), framemeting op het dashboard; **effect op de Pi zelf niet gemeten** |
+| Opstarten traag na het opstartscherm | ✅ / 🟡 | oorzaak in de service-volgorde gevonden en teruggezet naar 1.3.2; logo blijft via drop-in; niet op de Pi getest |
 | Oorzaak zien als de browserweergave niet start | 🟡 | launcher bewaart uitvoer + diagnose, zichtbaar in *Instellingen → Weergave*; getest met een nagebootste cage. **De echte oorzaak op de Pi is nog onbekend** |
 
 ---

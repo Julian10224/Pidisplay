@@ -117,6 +117,12 @@ def handle(conn):
                             resp["data"] = video_eof()
                     elif prop == "path":
                         resp["data"] = state["path"]
+                    elif prop in ("frame-drop-count", "decoder-frame-drop-count", "estimated-frame-number"):
+                        # FAKE_MPV_FRAMES="overgeslagen,totaal" per video (standaard 0,30)
+                        drops, total = (int(x) for x in os.environ.get("FAKE_MPV_FRAMES", "0,30").split(","))
+                        is_video = str(state["path"] or "").endswith((".mp4", ".webm", ".mkv", ".mov"))
+                        resp["data"] = (0 if prop == "decoder-frame-drop-count" else
+                                        drops if prop == "frame-drop-count" else total) if is_video else 0
                     elif prop in state["props"]:
                         resp["data"] = state["props"][prop]
                     else:

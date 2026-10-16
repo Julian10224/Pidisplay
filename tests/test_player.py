@@ -411,3 +411,24 @@ def test_mpv_logo_overlay_per_item(tmp_path, fake_log):
         assert not any(x.startswith("set overlay-add") for x in ev[j:k + 1]), "item b heeft geen logo"
     finally:
         pt.stop()
+
+
+def test_mpv_counts_dropped_frames_and_uses_fast_render(tmp_path, fake_log, monkeypatch):
+    monkeypatch.setenv("FAKE_MPV_FRAMES", "3,60")
+    _ini, player_ini = make_config(tmp_path, port=free_port())
+    a = img(tmp_path, "a.png")
+    v = tmp_path / "v.mp4"
+    v.write_bytes(b"x")
+    write_cache(str(tmp_path / "player-cache"), [
+        {"media_id": "1", "name": "a", "kind": "image", "local": a, "duration": 0.4},
+        {"media_id": "2", "name": "v", "kind": "video", "local": str(v), "video_duration": 1.0},
+    ])
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: loads(fake_log).count("v.mp4") >= 2, timeout=20)
+        assert wait_for(lambda: pt.player.status()["video_stats"]["total"] >= 120, timeout=10)
+        st = pt.player.status()["video_stats"]
+        assert st["dropped"] * 20 == st["total"], st            # 3 van 60 per video, foto's tellen niet mee
+        assert "--scale=bilinear" in pt.player.mpv.build_args() and "--dither-depth=no" in pt.player.mpv.build_args()
+    finally:
+        pt.stop()

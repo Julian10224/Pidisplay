@@ -50,6 +50,12 @@ def media_row_to_json(cfg, row, usage=None):
             out["preview_url"] = f"/display/{page.get('file', '')}"
         else:
             out["preview_url"] = f"/preview/{row['id']}/{preview_token(row['id'])}/{row['html_entry']}"
+    if row["kind"] == "video":
+        try:
+            out["optimize"] = state().optimizer.info(row["id"])
+        except (RuntimeError, AttributeError, KeyError):
+            out["optimize"] = None
+        out["optimized"] = row["playback_dir"] == "renditions"
     if usage is not None:
         out["playlists"] = usage.get(row["id"], [])
     return out
@@ -221,6 +227,8 @@ def register(app):
                 _remove_paths(created)
                 raise
             log.info("Media geüpload: %s (%s, %d bytes)", original, info["kind"], received)
+            if info["kind"] == "video":
+                state().optimizer.enqueue(media_id)   # zo nodig een afspeelversie maken
             row = get_media_row(conn, media_id)
             return jsonify(media=media_row_to_json(cfg, row, {}), duplicate=False), 201
         finally:
@@ -229,6 +237,18 @@ def register(app):
                     os.unlink(part)
                 except OSError:
                     pass
+
+    @app.post("/api/media/<media_id>/optimize")
+    def media_optimize(media_id):
+        """Afspeelversie (opnieuw) laten maken, bijvoorbeeld na een mislukte poging."""
+        conn = get_db()
+        row = get_media_row(conn, media_id)
+        if row["kind"] != "video":
+            raise ApiError(400, "Alleen video's kunnen worden omgezet.")
+        if row["playback_dir"] != "files":
+            raise ApiError(409, "Deze video heeft al een afspeelversie voor de Pi.")
+        state().optimizer.enqueue(media_id, force=True)
+        return jsonify(media=media_row_to_json(state().cfg, row, usage_map(conn)))
 
     @app.post("/api/media/builtin")
     def media_add_builtin():
@@ -288,6 +308,7 @@ def register(app):
             for pid in touched:
                 conn.execute("UPDATE playlists SET updated_at = ? WHERE id = ?", (db.now(), pid))
         for row in rows:
+            state().optimizer.forget(row["id"])
             paths = media.media_paths(cfg, row)
             _remove_paths({paths["file"], paths["playback"], paths["thumb"]})
             log.info("Media verwijderd: %s", row["name"])

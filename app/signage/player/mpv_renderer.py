@@ -65,7 +65,8 @@ class MpvRenderer:
         runtime = os.environ.get("RUNTIME_DIRECTORY") or self.cache_dir
         self.mpv = Mpv(pcfg.get("mpv_binary"), os.path.join(runtime, "mpv.sock"),
                        hwdec=pcfg.get("hwdec"), vo=pcfg.get("vo"), gpu_context=pcfg.get("gpu_context"),
-                       audio_device=pcfg.get("audio_device"), extra_args=pcfg.get("extra_args"))
+                       audio_device=pcfg.get("audio_device"), extra_args=pcfg.get("extra_args"),
+                       render_quality=(pcfg.get("render_quality") or "fast").strip().lower())
         self.queue = queue.Queue()
         self.cfg = None
         self.pending = None
@@ -101,6 +102,8 @@ class MpvRenderer:
         self.forced = None           # (lijst, index, fallback) dat als volgende moet spelen
         self.played = []             # afgespeelde posities, voor 'vorige' bij willekeurige volgorde
         self.last_control = None
+        self.video_loaded = False     # speelt er nu een video (voor de framemeting)?
+        self.video_stats = {"dropped": 0, "total": 0}
         self.syncer = Syncer(pcfg, self.cache_dir, self.queue, self.status, on_command=self.commands.put)
 
     # Compatibiliteit met 1.0 (tests en logboeken gebruiken 'mode').
@@ -158,6 +161,7 @@ class MpvRenderer:
                 "uptime": time.time() - self.started,
                 "message": self.message or self.syncer.last_error,
                 "control": {"v": 1, "last": self.last_control},
+                "video_stats": dict(self.video_stats),
             }
 
     # -- configuratie --------------------------------------------------------------
@@ -253,6 +257,7 @@ class MpvRenderer:
         self.mpv_started_once = True
         self.message = None
         self.applied = {}
+        self.video_loaded = False
         self.overlay = None
         self.screen_size = None
         self.apply_properties()
@@ -342,7 +347,22 @@ class MpvRenderer:
             self.overlay = None
 
     # -- afspelen ------------------------------------------------------------------
+    def _collect_video_stats(self):
+        """Overgeslagen en getoonde frames van de video die nu stopt bij het totaal optellen."""
+        if not self.video_loaded:
+            return
+        self.video_loaded = False
+        try:
+            dropped = int(self.mpv.get("frame-drop-count", 0) or 0) + int(self.mpv.get("decoder-frame-drop-count", 0) or 0)
+            frames = int(self.mpv.get("estimated-frame-number", 0) or 0)
+        except (MpvError, TypeError, ValueError):
+            return
+        with self.lock:
+            self.video_stats["dropped"] += dropped
+            self.video_stats["total"] += max(frames, dropped)
+
     def _load(self, path, scale, logo=None):
+        self._collect_video_stats()
         self.apply_scale(scale)
         self.mpv.command("loadfile", path, "replace")
         # Met --keep-open pauzeert mpv aan het einde van een video, en die pauze
@@ -384,6 +404,7 @@ class MpvRenderer:
         except MpvError as exc:
             self.restart_mpv(str(exc))
             return
+        self.video_loaded = item.get("kind") == "video"
         if not (self.played and self.played[-1][0] is self.items and self.played[-1][1] == self.index):
             self.played.append((self.items, self.index, self.fallback_active))
             self.played = self.played[-50:]
@@ -507,6 +528,7 @@ class MpvRenderer:
         except MpvError as exc:
             self.restart_mpv(str(exc))
             return
+        self.video_loaded = True
         self.transition = t
         self.deadline = None
         self.set_state("PLAYING_TRANSITION", t.get("name"))

@@ -403,3 +403,6 @@ table.list th { color: var(--ink-3); font-weight: 500; font-size: .82rem; }
 .splash-preview img { position: absolute; left: 25%; width: 50%; top: 29%; height: 34%; object-fit: contain; }
 .splash-bar { position: absolute; left: 36%; width: 28%; top: 69%; height: 3px; background: rgba(255, 255, 255, .18); }
 .splash-bar span { display: block; height: 100%; width: 40%; background: rgba(255, 255, 255, .92); }
+
+/* ---------- 1.5: video's omzetten voor de Pi ---------- */
+.opt-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 0; }

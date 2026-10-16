@@ -307,20 +307,31 @@ dan wordt het item zonder logo getoond (met een melding).
 |---|---|---|
 | Afbeelding | PNG, JPEG, WebP | Rechtop gezet (EXIF). Max. 40 megapixel. |
 | Video | **MP4 met H.264 (8-bit, yuv420p) + AAC**, tot **1920×1080 @ 30 fps** | De aanbevolen vorm, ook voor overgangsvideo's. |
-| Video, met waarschuwing | H.265/HEVC, VP9, AV1, 10-bit H.264, >1080p of 60 fps bij 1080p | Geaccepteerd met waarschuwing; de Pi 3B+ decodeert dit in software en dat hapert of lukt niet. |
+| Video, wordt automatisch omgezet | H.265/HEVC (iPhone), VP9, AV1, 10-bit/4:2:2 H.264, groter dan 1920×1080, meer dan 30 fps, bitrate boven 20 Mbit/s, interlaced | De Pi maakt op de achtergrond een afspeelversie: H.264 High, passend verkleind tot 1920×1080 (staand: 1080×1920), max. 30 fps (50/60 wordt 25/30), max. 8 Mbit/s, AAC. Het origineel blijft bewaard en downloadbaar; tot de afspeelversie klaar is speelt het origineel. Zie hieronder. |
 | HTML | `.html` of `.zip` met `index.html` | Zie §4. |
 | Geweigerd | Alles wat geen echte afbeelding/video/HTML is (ook bij een misleidende extensie) | — |
 
-Een video omzetten naar het aanbevolen formaat (op je computer, met ffmpeg):
+**Automatisch omzetten** (vanaf 1.5, *Instellingen → Weergave → Video's*, standaard aan). Bij
+*Media* zie je per video *Wacht op omzetten*, *Omzetten voor de Pi… 45%*, *Geschikt gemaakt voor
+de Pi* (met de reden) of *Omzetten mislukt* (met *Opnieuw proberen*). Video's die al op de Pi
+stonden worden na de update ook bekeken. Het omzetten draait met de laagste voorrang, zodat het
+scherm doorspeelt; het gebruikt de hardware-encoder van de Pi als die werkt, anders libx264. Op een
+Pi 3B+ duurt het een paar keer zo lang als de video zelf (niet op de Pi gemeten; in de testomgeving
+44 s voor 90 s 1080p60). De afspeelversie neemt extra ruimte in (zichtbaar bij *Media*).
+
+Zelf vooraf omzetten kan ook (op je computer, met ffmpeg), dan hoeft de Pi niets te doen:
 
 ```bash
 ffmpeg -i invoer.mov -c:v libx264 -profile:v high -level 4.0 -pix_fmt yuv420p \
   -vf "scale='min(1920,iw)':-2,fps=30" -c:a aac -b:a 128k -movflags +faststart uitvoer.mp4
 ```
 
+**Haperende video's.** De mpv-weergave schaalt het beeld (vanaf 1.5) met lichte filters, want de
+standaardinstellingen van nieuwere mpv-versies (Raspberry Pi OS Trixie) zijn te zwaar voor de GPU
+van de Pi 3B+ bij 1080p (`render_quality = fast` in `player.ini`; `default` = de standaard van mpv).
+Het dashboard toont bij *Weergave* in beide weergaven het percentage overgeslagen videoframes;
+blijft dat boven een paar procent, gebruik dan 720p-video's.
 Of video's in Chromium op de Pi 3B+ hardwarematig worden gedecodeerd is niet getest (zie §18).
-Controleer het percentage overgeslagen videoframes op het dashboard; is dat hoog, gebruik dan
-720p-video's of kies de mpv-weergave (*Instellingen → Weergave*, of `sudo signage-admin renderer mpv`; zonder HTML).
 
 ---
 

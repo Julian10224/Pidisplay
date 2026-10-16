@@ -26,7 +26,7 @@ def _settings_json(conn):
     s = db.get_settings(conn)
     return {"system_name": s["system_name"], "default_image_duration": s["default_image_duration"],
             "default_playlist_id": s["default_playlist_id"], "volume": s["volume"],
-            "scale_mode": s.get("scale_mode", "cover")}
+            "scale_mode": s.get("scale_mode", "cover"), "optimize_videos": bool(s.get("optimize_videos", True))}
 
 
 def compute_warnings(conn, cfg, st, players):
@@ -162,6 +162,8 @@ def register(app):
             if data["scale_mode"] not in db.SCALE_MODES:
                 raise ApiError(400, "Ongeldige schaalmodus.")
             changes["scale_mode"] = data["scale_mode"]
+        if "optimize_videos" in data:
+            changes["optimize_videos"] = bool(data["optimize_videos"])
         if "volume" in data:
             try:
                 vol = int(data["volume"])
@@ -184,6 +186,8 @@ def register(app):
                 db.set_setting(conn, k, v)
         if "system_name" in changes:
             refresh_standby(state(), force=True)
+        if changes.get("optimize_videos"):
+            state().optimizer.scan()   # video's die nog niet bekeken zijn alsnog omzetten
         return jsonify(settings=_settings_json(conn))
 
     # -- systeeminformatie en -acties ------------------------------------------

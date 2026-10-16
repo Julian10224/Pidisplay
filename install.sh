@@ -435,6 +435,14 @@ fi
 for u in signage-server.service signage-player.service signage-backup.service signage-backup.timer; do
     install -o root -g root -m 0644 "$SRC/systemd/$u" "/etc/systemd/system/$u"
 done
+# Opstartscherm: plymouth-quit laat het logo staan tot de player tekent (drop-in).
+if has_player && [ "$SPLASH" = 1 ]; then
+    install -d -m 0755 /etc/systemd/system/plymouth-quit.service.d
+    install -o root -g root -m 0644 "$SRC/systemd/plymouth-quit.service.d/signage.conf" \
+        /etc/systemd/system/plymouth-quit.service.d/signage.conf
+else
+    rm -f /etc/systemd/system/plymouth-quit.service.d/signage.conf
+fi
 systemctl daemon-reload
 
 if has_server; then

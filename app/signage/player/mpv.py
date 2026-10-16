@@ -15,9 +15,20 @@ class MpvError(Exception):
     pass
 
 
+# Lichte beeldverwerking voor de GPU van de Pi 3B+ (VideoCore IV). Nieuwere mpv-versies
+# (0.37+, zoals in Raspberry Pi OS Trixie) schalen standaard met zware filters (lanczos,
+# dithering, lineair verkleinen); dat haalt de Pi 3 bij 1080p niet en het beeld hapert.
+# Al deze opties bestaan ook in mpv 0.35 (Bookworm).
+FAST_RENDER = [
+    "--scale=bilinear", "--dscale=bilinear", "--cscale=bilinear", "--dither-depth=no",
+    "--correct-downscaling=no", "--linear-downscaling=no", "--sigmoid-upscaling=no",
+    "--hdr-compute-peak=no", "--deband=no", "--video-sync=audio", "--framedrop=vo",
+]
+
+
 class Mpv:
     def __init__(self, binary, socket_path, hwdec="v4l2m2m-copy", vo="gpu", gpu_context="drm",
-                 audio_device="auto", extra_args="", volume=80, rotation=0):
+                 audio_device="auto", extra_args="", volume=80, rotation=0, render_quality="fast"):
         self.binary = binary
         self.socket_path = socket_path
         self.hwdec = hwdec
@@ -25,6 +36,7 @@ class Mpv:
         self.gpu_context = gpu_context
         self.audio_device = audio_device
         self.extra_args = extra_args
+        self.render_quality = render_quality
         self.initial_volume = volume
         self.initial_rotation = rotation
         self.proc = None
@@ -61,6 +73,8 @@ class Mpv:
         ]
         if self.vo == "gpu" and self.gpu_context:
             args.append("--gpu-context=" + self.gpu_context)
+        if self.render_quality != "default":
+            args += FAST_RENDER
         if self.audio_device and self.audio_device != "auto":
             args.append("--audio-device=" + self.audio_device)
         if self.extra_args:

@@ -323,6 +323,8 @@ function rendererText(st) {
     if (st.viewport && st.viewport.screen_w) parts.push(`${st.viewport.screen_w}×${st.viewport.screen_h}`);
   } else if (st.renderer === 'mpv') {
     parts.push('mpv (foto, video; geen HTML)');
+    const vs = st.video_stats;
+    if (vs && vs.total > 50) parts.push(`${(100 * vs.dropped / vs.total).toFixed(1).replace('.', ',')}% videoframes overgeslagen`);
     if (st.hwdec) parts.push(st.hwdec === 'no' ? 'softwaredecodering' : `hardwaredecodering (${st.hwdec})`);
   }
   if (st.renderer_note) parts.push(st.renderer_note);
@@ -557,6 +559,27 @@ function rolesText(roles) {
   return parts.length ? ` (${parts.join(', ')})` : '';
 }
 
+/* Afspeelversie voor de Pi 3B+ (zware video's worden automatisch omgezet). */
+function optimizeInfo(m, retry) {
+  if (m.kind !== 'video') return null;
+  const o = m.optimize || {};
+  const why = (o.reasons || []).join(', ');
+  if (o.state === 'running') {
+    return html`<p class="small opt-line"><span class="badge signal">Omzetten voor de Pi… ${Math.round(100 * (o.progress || 0))}%</span>
+      <span class="muted">${why ? why + ' — ' : ''}tot het klaar is speelt het origineel.</span></p>`;
+  }
+  if (o.state === 'queued') return html`<p class="small opt-line"><span class="badge">Wacht op omzetten</span></p>`;
+  if (m.optimized) {
+    return html`<p class="small opt-line"><span class="badge ok" title=${o.message ? 'Origineel: ' + o.message : ''}>Geschikt gemaakt voor de Pi</span>
+      ${why && html`<span class="muted">origineel: ${why}</span>`}</p>`;
+  }
+  if (o.state === 'failed') {
+    return html`<p class="small opt-line"><span class="badge alert" title=${o.message || ''}>Omzetten mislukt</span>
+      <button class="btn tiny" onClick=${() => retry(m)}>Opnieuw proberen</button></p>`;
+  }
+  return null;
+}
+
 function usageBadges(m) {
   const pl = m.playlists || [];
   const has = (role) => pl.filter((p) => (p.roles || []).includes(role));
@@ -590,6 +613,17 @@ function MediaPage() {
     setSel((cur) => new Set([...cur].filter((id) => d.media.some((m) => m.id === id))));
   };
   useEffect(() => { load().catch(fail); }, []);
+  // Zolang er video's worden omgezet: voortgang bijwerken.
+  const converting = !!(data && data.media.some((m) => m.optimize && ['queued', 'running'].includes(m.optimize.state)));
+  useEffect(() => {
+    if (!converting) return undefined;
+    const t = setInterval(() => { if (document.visibilityState === 'visible') load().catch(() => {}); }, 3000);
+    return () => clearInterval(t);
+  }, [converting]);
+  const retryOptimize = async (m) => {
+    try { await api('POST', `/api/media/${m.id}/optimize`); toast(`'${m.name}' wordt opnieuw omgezet.`); await load(); }
+    catch (e) { fail(e); }
+  };
 
   const update = (id, patch) => {
     queueRef.current = queueRef.current.map((u) => (u.id === id ? { ...u, ...patch } : u));
@@ -790,6 +824,7 @@ function MediaPage() {
               ${!m.playlists.length && html`<span class="badge">Niet gebruikt</span>`}
             </div>
             ${m.warning && html`<p class="small muted">${m.warning}</p>`}
+            ${optimizeInfo(m, retryOptimize)}
             <div class="tile-actions">
               <button class="btn ghost icon" title="Voorbeeld" aria-label="Voorbeeld" onClick=${() => setPreview(m)}><${Icon} name="eye" /></button>
               <button class="btn ghost icon" title="Wijzigen" aria-label="Wijzigen" onClick=${() => setRename(m)}><${Icon} name="edit" /></button>
@@ -1565,6 +1600,19 @@ function SettingsPage({ user, onLogout }) {
                 <span class="small muted">${SCALE_HELP[mode]}</span></label>`)}
             </div>
             <p class="muted small">Per playlistitem kun je hiervan afwijken. HTML-pagina's vullen het scherm altijd zelf, behalve als je bij de pagina een vast ontwerpformaat instelt; dan geldt de schaalmodus ook voor de pagina.</p>
+          </fieldset>
+          <fieldset class="fieldset" style="margin-bottom:16px"><legend>Video's</legend>
+            <label class="check"><input type="checkbox" checked=${s.optimize_videos !== false} disabled=${busy === 'optimize'}
+              onChange=${(e) => { const v = e.target.checked; const prev = s.optimize_videos; setS({ ...s, optimize_videos: v });
+                run('optimize', async () => { try { const r = await api('PUT', '/api/settings', { optimize_videos: v }); setS(r.settings); }
+                  catch (err) { setS((cur) => ({ ...cur, optimize_videos: prev })); throw err; } },
+                v ? 'Zware video\'s worden automatisch geschikt gemaakt voor de Pi.' : 'Video\'s worden niet meer automatisch omgezet.'); }} />
+              Zware video's automatisch geschikt maken voor de Raspberry Pi</label>
+            <p class="muted small">De Pi 3B+ speelt video's alleen vloeiend af als H.264 tot 1920×1080 bij maximaal 30 beelden per seconde.
+              Video's in HEVC (iPhone), 4K, 50/60 fps, 10-bit of met een heel hoge bitrate krijgen op de achtergrond een afspeelversie
+              die daaraan voldoet. Het origineel blijft bewaard en downloadbaar; tot de afspeelversie klaar is speelt het origineel.
+              Omzetten duurt op de Pi een paar keer zo lang als de video zelf en gebeurt met lage voorrang, zodat het scherm gewoon doorspeelt.
+              De voortgang zie je bij Media.</p>
           </fieldset>
           <fieldset class="fieldset" style="margin-bottom:16px"><legend>Weergave van deze player (kioskmodus)</legend>
             ${info.renderer && html`<div class="stack" style="gap:10px">

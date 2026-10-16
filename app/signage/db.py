@@ -118,6 +118,7 @@ DEFAULT_SETTINGS = {
     "default_playlist_id": None,
     "volume": 80,
     "scale_mode": "cover",
+    "optimize_videos": True,
 }
 
 SCALE_MODES = ("cover", "contain", "fill")

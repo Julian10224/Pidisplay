@@ -30,7 +30,7 @@ diagnose() {
     echo "cage:      $(command -v cage || echo ontbreekt)"
     local cb
     cb="$(command -v chromium || command -v chromium-browser || true)"
-    echo "Chromium:  ${cb:-ontbreekt} $( [ -n "$cb" ] && timeout 15 "$cb" --version 2>/dev/null | head -n 1)"
+    echo "Chromium:  ${cb:-ontbreekt} $( [ -n "$cb" ] && timeout 5 "$cb" --version 2>/dev/null | head -n 1)"
     echo "Gebruiker: $(id)"
     echo "Sessie:    XDG_SESSION_ID=${XDG_SESSION_ID:-} XDG_SEAT=${XDG_SEAT:-} XDG_VTNR=${XDG_VTNR:-} XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
     if [ -n "${XDG_SESSION_ID:-}" ] && command -v loginctl >/dev/null 2>&1; then
