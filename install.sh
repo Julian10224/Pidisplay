@@ -17,11 +17,14 @@
 #     --no-watchdog              Hardware-watchdog niet inschakelen
 #     --no-gpu-mem               config.txt niet aanpassen (gpu_mem voor videodecodering)
 #     --no-browser               Geen Chromium/cage installeren; alleen mpv-weergave (geen HTML)
+#     --no-splash                Geen opstartscherm (logo met laadbalk via Plymouth); laat
+#                                cmdline.txt/config.txt ongemoeid en draait een eerder
+#                                ingesteld opstartscherm terug (--splash zet het weer aan)
 #     --help
 #
 #  Het script is veilig opnieuw uit te voeren (ook voor updates): bestaande
 #  configuratie, database en media blijven altijd behouden. Opties die je bij een
-#  update niet opgeeft (--role, --no-browser, --no-watchdog, --no-gpu-mem) komen uit
+#  update niet opgeeft (--role, --no-browser, --no-watchdog, --no-gpu-mem, --no-splash) komen uit
 #  /etc/signage/install.conf, dat bij de eerste installatie wordt aangemaakt.
 # =============================================================================
 set -euo pipefail
@@ -37,6 +40,7 @@ DISABLE_DESKTOP=0
 WATCHDOG=""
 GPU_MEM=""
 BROWSER=""
+SPLASH=""
 INSTALL_CONF=/etc/signage/install.conf
 LOG=/var/log/signage-install.log
 NEEDS_REBOOT=0
@@ -57,6 +61,8 @@ while [ $# -gt 0 ]; do
         --no-watchdog) WATCHDOG=0; shift ;;
         --no-gpu-mem) GPU_MEM=0; shift ;;
         --no-browser) BROWSER=0; shift ;;
+        --no-splash) SPLASH=0; shift ;;
+        --splash) SPLASH=1; shift ;;
         -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) die "Onbekende optie: $1 (zie --help)" ;;
     esac
@@ -84,6 +90,8 @@ if [ -z "$BROWSER" ]; then
     # Bestaande installatie zonder cage: toen met --no-browser geïnstalleerd; zo laten.
     [ $EXISTING = 1 ] && [ -f /etc/signage/player.ini ] && ! command -v cage >/dev/null 2>&1 && BROWSER=0
 fi
+[ -n "$SPLASH" ] || SPLASH="$(saved splash)"
+[ -n "$SPLASH" ] || SPLASH=1     # nieuw in 1.4: ook bij een update standaard aan
 [ -n "$WATCHDOG" ] || WATCHDOG="$(saved watchdog)"
 [ -n "$GPU_MEM" ] || GPU_MEM="$(saved gpu_mem)"
 # Bij een update zonder install.conf geen nieuwe systeemwijzigingen (watchdog, config.txt).
@@ -91,7 +99,7 @@ fi
 [ -n "$GPU_MEM" ] || { [ $EXISTING = 1 ] && GPU_MEM=0 || GPU_MEM=1; }
 
 case "$ROLE" in all|server|player) ;; *) die "--role moet all, server of player zijn." ;; esac
-case "$BROWSER$WATCHDOG$GPU_MEM" in [01][01][01]) ;; *) die "Ongeldige waarden in $INSTALL_CONF." ;; esac
+case "$BROWSER$WATCHDOG$GPU_MEM$SPLASH" in [01][01][01][01]) ;; *) die "Ongeldige waarden in $INSTALL_CONF." ;; esac
 [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "Ongeldige poort: $PORT"
 if [ "$ROLE" = player ]; then
     [ -n "$SERVER_URL" ] || [ -f /etc/signage/player.ini ] || die "--role player vereist --server URL en --token TOKEN."
@@ -176,6 +184,7 @@ fi
 PKGS=(python3 sudo iproute2)
 if has_server; then PKGS+=(python3-flask python3-waitress python3-pil ffmpeg fonts-dejavu-core avahi-daemon); fi
 if has_player; then PKGS+=(mpv fonts-dejavu-core python3-pil); fi
+if has_player && [ "$SPLASH" = 1 ]; then PKGS+=(plymouth); fi
 
 # Browserweergave (HTML-content, overgangen met voorgeladen lagen): cage + Chromium.
 BROWSER_PKGS=()
@@ -393,6 +402,33 @@ if has_player && [ $GPU_MEM = 1 ] && [[ "$MODEL" == *"Raspberry Pi 3"* ]]; then
     fi
 fi
 
+# Opstartscherm: logo in het midden met een laadbalk (Plymouth-thema 'signage').
+if has_player && [ "$SPLASH" = 1 ]; then
+    if command -v plymouthd >/dev/null 2>&1; then
+        c_info "Opstartscherm instellen (kan op een Pi 3B+ 1–2 minuten duren)…"
+        if out="$(/usr/local/sbin/signage-priv splash-sync 2>&1)"; then
+            c_ok "Opstartscherm ingesteld (logo met laadbalk; kies je eigen logo onder Instellingen → Opstartscherm)"
+        else
+            c_warn "Opstartscherm instellen mislukt: $out"
+        fi
+        if out="$("$REL/bin/signage-bootconfig" enable "$BOOT_DIR" 2>&1)"; then
+            if [ "$out" = changed ]; then
+                c_ok "Opstartregels aangepast voor het opstartscherm (quiet splash; back-up van cmdline.txt en config.txt gemaakt)"
+                NEEDS_REBOOT=1
+            fi
+        else
+            c_warn "cmdline.txt/config.txt niet aangepast: $out"
+        fi
+    else
+        c_warn "Plymouth ontbreekt; geen opstartscherm."
+    fi
+elif has_player && [ "$SPLASH" = 0 ] && [ -f /etc/signage/bootconfig-added ]; then
+    if out="$("$REL/bin/signage-bootconfig" disable "$BOOT_DIR" 2>&1)" && [ "$out" = changed ]; then
+        c_ok "Opstartscherm uitgezet (opstartregels teruggezet)"
+        NEEDS_REBOOT=1
+    fi
+fi
+
 # -----------------------------------------------------------------------------
 # 7. systemd
 # -----------------------------------------------------------------------------
@@ -441,8 +477,8 @@ if has_player; then
 fi
 
 # Gekozen opties bewaren voor volgende updates (ook via de knop in de beheerwebsite).
-printf '# Signage: opties van de installatie, gebruikt bij updates zonder opties.\nrole=%s\nbrowser=%s\nwatchdog=%s\ngpu_mem=%s\n' \
-    "$ROLE" "$BROWSER" "$WATCHDOG" "$GPU_MEM" > "$INSTALL_CONF.tmp" && chmod 0644 "$INSTALL_CONF.tmp" && mv -f "$INSTALL_CONF.tmp" "$INSTALL_CONF"
+printf '# Signage: opties van de installatie, gebruikt bij updates zonder opties.\nrole=%s\nbrowser=%s\nwatchdog=%s\ngpu_mem=%s\nsplash=%s\n' \
+    "$ROLE" "$BROWSER" "$WATCHDOG" "$GPU_MEM" "$SPLASH" > "$INSTALL_CONF.tmp" && chmod 0644 "$INSTALL_CONF.tmp" && mv -f "$INSTALL_CONF.tmp" "$INSTALL_CONF"
 
 echo
 echo "=== Klaar: Signage $SIG_VERSION ==="

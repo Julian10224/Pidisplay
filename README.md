@@ -200,7 +200,23 @@ paar seconden lang twee keer per seconde, zodat je ziet wat er werkelijk op het 
 
 **Instellingen** — systeemnaam, standaardplaylist, standaardduur, volume, **schaalmodus**,
 **weergave/kioskmodus** (automatisch, browser of mpv), player herstarten/uitzetten, hostnaam, tijdzone, tijdsynchronisatie, tijd handmatig instellen,
-back-ups, logboeken, systeeminformatie, herstart, wachtwoord.
+**opstartscherm** (logo), back-ups, logboeken, **software bijwerken**, systeeminformatie, herstart, wachtwoord.
+
+**Opstartscherm** — terwijl de Raspberry Pi opstart staat er een logo in het midden van het
+scherm met een laadbalk eronder, op een zwarte achtergrond. Het logo blijft staan tot de
+player het scherm overneemt. Kies je eigen logo onder *Instellingen → Opstartscherm*: upload
+het eerst bij *Media* (bij voorkeur een PNG met transparante achtergrond) en kies het daar.
+Zonder eigen logo verschijnt een neutraal standaardlogo.
+
+- Het logo wordt maximaal half zo breed en een derde zo hoog als het scherm, en draait mee
+  met de schermstand van de lokale player.
+- Na het kiezen wordt het opstartbestand (initramfs) bijgewerkt; dat duurt op een Pi 3B+ 1–2
+  minuten. *Raspberry Pi herstarten* in de website wacht daar vanzelf op; trek in die tijd de
+  stekker er niet uit.
+- Techniek: een Plymouth-thema (`/usr/share/plymouth/themes/signage`). Het installatiescript
+  zet `quiet splash` (en een paar verwante opties) in `cmdline.txt` en `disable_splash=1` in
+  `config.txt`, met een back-up van beide. Zonder opstartscherm: installeer met `--no-splash`;
+  dat zet die regels ook weer terug (weer aanzetten: `--splash`).
 
 ---
 
@@ -605,6 +621,7 @@ journalctl -u signage-player -n 100
 | Pagina met vaste opmaak valt buiten beeld | Stel bij de pagina het ontwerpformaat in (§4). |
 | Geen geluid via HDMI | mpv: zet `audio_device` in `player.ini` (`mpv --audio-device=help`). |
 | Dashboard meldt onderspanning | Gebruik de officiële voeding (5,1 V / 2,5 A). |
+| Opstartscherm blijft hangen of je wilt de opstartmeldingen zien | Haal `quiet splash` uit `cmdline.txt` op de SD-kaart, of installeer opnieuw met `--no-splash`. |
 | Website niet bereikbaar | Controleer het IP-adres; `systemctl status signage-server`; poort 80 bezet? |
 
 ---
@@ -615,7 +632,8 @@ journalctl -u signage-player -n 100
 - **Media uit PiSignage overnemen**: kopieer de mediabestanden van de oude kaart naar je
   computer en upload ze via *Media*.
 - **Verwijderen**: `sudo bash /boot/firmware/signage/uninstall.sh` verwijdert services en
-  software en bewaart gegevens; met `--purge` ook gegevens, configuratie en gebruiker.
+  software en bewaart gegevens; met `--purge` ook gegevens, configuratie en gebruiker. Het
+  opstartscherm en de toevoegingen aan `cmdline.txt`/`config.txt` worden teruggedraaid.
   Systeempakketten (mpv, Chromium, …) blijven staan.
 
 ---
@@ -748,6 +766,10 @@ zijn opnieuw getest en geslaagd; zie `CHANGELOG.md`.
 - HTML-pagina's kunnen geen geluid laten horen tenzij ze zelf media afspelen; interactie
   (aanraken, toetsenbord) wordt niet ondersteund.
 - Eén beheeraccount, geen tijdschema's, HTTP zonder TLS (vertrouwd lokaal netwerk).
+- **Opstartscherm**: het Plymouth-thema is getest met Plymouth op een virtueel scherm (ook
+  90° gedraaid), niet op de Pi zelf. Hoe vroeg het logo verschijnt hangt af van de initramfs;
+  tussen het opstartscherm en het eerste beeld van de browserweergave kan het scherm nog even
+  zwart zijn terwijl Chromium start.
 - **Live bediening** werkt alleen als de player online is en versie 1.3 of nieuwer draait. In
   de mpv-weergave kan bij snel doorklikken heel kort het vorige of een zwart frame te zien
   zijn (geen voorladen). Elke externe player houdt één verbinding open voor opdrachten; de

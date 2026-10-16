@@ -379,12 +379,13 @@ def create_app(cfg=None, start_background=True):
         return jsonify(ok=True)
 
     # -- routes uit de andere modules -------------------------------------------
-    from . import routes_media, routes_playlists, routes_players, routes_system, routes_update
+    from . import routes_media, routes_playlists, routes_players, routes_system, routes_update, routes_splash
     routes_media.register(app)
     routes_playlists.register(app)
     routes_players.register(app)
     routes_system.register(app)
     routes_update.register(app)
+    routes_splash.register(app)
 
     # -- statische frontend ------------------------------------------------------
     @app.get("/")

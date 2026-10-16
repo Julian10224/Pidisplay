@@ -1,5 +1,26 @@
 # Wijzigingen
 
+## 1.4.0 — opstartscherm met logo en laadbalk
+
+- **Opstartscherm**: tijdens het opstarten staat er een logo in het midden met een laadbalk
+  eronder (Plymouth-thema `signage`, zwarte achtergrond). Het logo blijft staan tot de player
+  het scherm overneemt (`plymouth quit --retain-splash` in de player-service, zoals een display
+  manager), dus geen tekst of zwart beeld tussendoor.
+- **Eigen logo** kiezen onder *Instellingen → Opstartscherm* (uit Media, bij voorkeur een PNG met
+  transparantie), met voorbeeld; zonder eigen logo een neutraal standaardlogo. Het logo draait
+  mee met de schermstand van de lokale player.
+- `install.sh`: installeert `plymouth`, zet het thema (en werkt de initramfs bij) en voegt
+  `quiet splash plymouth.ignore-serial-consoles logo.nologo vt.global_cursor_default=0` aan
+  `cmdline.txt` en `disable_splash=1` aan `config.txt` toe, met back-ups. Wat is toegevoegd staat
+  in `/etc/signage/bootconfig-added`; `--no-splash` en `uninstall.sh` draaien precies dat terug.
+  De optie wordt onthouden in `install.conf`.
+- `signage-priv`: acties `splash` (website) en `splash-sync` (installatie). *Herstarten* wacht op
+  een lopende initramfs-update.
+
+Getest: het thema met Plymouth 24 op een virtueel scherm (0° en 90°, laadbalk loopt op), de
+instelling in de beheerwebsite, installatie/upgrade met nagebootste `cmdline.txt`/`config.txt`,
+terugdraaien. Niet getest op de Pi zelf. 115 automatische tests geslaagd.
+
 ## 1.3.2 — software bijwerken met een knop, foutmelding van de browserweergave
 
 Nieuw:

@@ -394,3 +394,12 @@ table.list th { color: var(--ink-3); font-weight: 500; font-size: .82rem; }
 .live-ctl .row { flex-wrap: wrap; }
 .live-ctl .btn svg { width: 16px; height: 16px; }
 .live-fail { color: var(--alert); margin: 0; }
+
+/* ---------- 1.4: opstartscherm ---------- */
+.splash-setting { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: 18px; align-items: start; }
+@media (max-width: 640px) { .splash-setting { grid-template-columns: minmax(0, 1fr); } }
+/* Benadert de opmaak van het Plymouth-thema: logo max. 50% × 34%, iets boven het midden; balk 28% breed. */
+.splash-preview { position: relative; aspect-ratio: 16 / 9; background: #000; border-radius: var(--r-sm); overflow: hidden; }
+.splash-preview img { position: absolute; left: 25%; width: 50%; top: 29%; height: 34%; object-fit: contain; }
+.splash-bar { position: absolute; left: 36%; width: 28%; top: 69%; height: 3px; background: rgba(255, 255, 255, .18); }
+.splash-bar span { display: block; height: 100%; width: 40%; background: rgba(255, 255, 255, .92); }

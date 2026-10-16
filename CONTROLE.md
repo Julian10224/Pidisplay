@@ -1,6 +1,6 @@
 # Controle van de code tegen beide opdrachten
 
-Versie 1.3.2. Per eis: waar het in de code zit en hoe het is gecontroleerd.
+Versie 1.4.0. Per eis: waar het in de code zit en hoe het is gecontroleerd.
 
 **Legenda**
 
@@ -153,6 +153,7 @@ staat als 🟡 en is opgenomen in de checklist in README §17.
 | Knop in de website om de live playlist door te klikken en alles in een paar seconden te testen | ✅ / 🟡 | *Vorige*/*Volgende* op dashboard en *Schermen*, klikbare filmstrip, ← →, optioneel met overgang; `test_v13.py`, 8 browsertests (ook de hele keten met de browserweergave) (0 frames zwart bij doorklikken), geïnstalleerd systeem met echte mpv 10/10 (0,2–0,4 s); niet op het fysieke scherm bekeken |
 | Willekeurige volgorde blijft willekeurig bij de live bediening | ✅ | niet te reproduceren als volgorde van de playlist (gemeten in beide weergaven en via de server); wel twee verwarrende punten opgelost: dashboardteller en onvolledige eerste ronde na aanzetten tijdens afspelen; tests in `test_v13.py` en browsertest |
 | Software bijwerken met een knop in de website | ✅ | `routes_update.py`, `bin/signage-update`, `signage-priv update`; getest op het geïnstalleerde systeem: knop → download van GitHub → installatie → herstart → pagina laadt 1.3.2 (± 18 s, zonder nieuwe pakketten) |
+| Logo in het midden met laadbalk bij het opstarten | ✅ / 🟡 | Plymouth-thema via `signage-priv splash`, eigen logo onder *Instellingen → Opstartscherm*; gerenderd met Plymouth op een virtueel scherm (0°/90°); `test_splash.py`; **niet op de Pi bekeken** |
 | Oorzaak zien als de browserweergave niet start | 🟡 | launcher bewaart uitvoer + diagnose, zichtbaar in *Instellingen → Weergave*; getest met een nagebootste cage. **De echte oorzaak op de Pi is nog onbekend** |
 
 ---

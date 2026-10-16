@@ -1,10 +1,14 @@
 [Unit]
 Description=Signage-player (afspelen op het HDMI-scherm)
 Documentation=file:///opt/signage/current/README.md
-After=signage-server.service systemd-user-sessions.service plymouth-quit-wait.service getty@tty1.service
+After=signage-server.service systemd-user-sessions.service plymouth-start.service getty@tty1.service
 Wants=signage-server.service
 # De player neemt de eerste console (tty1) over; inloggen op het scherm kan via Ctrl+Alt+F2.
-Conflicts=getty@tty1.service
+# Het opstartscherm (Plymouth) blijft staan tot de player het scherm overneemt: de player
+# beëindigt het zelf (ExecStartPre), net als een display manager. Start de player niet,
+# dan ruimt plymouth-quit.service het alsnog op.
+Conflicts=getty@tty1.service plymouth-quit.service
+OnFailure=plymouth-quit.service
 StartLimitIntervalSec=600
 StartLimitBurst=10
 
@@ -32,6 +36,8 @@ Environment=HOME=/var/lib/signage/player
 Environment=XDG_RUNTIME_DIR=/run/signage-player
 RuntimeDirectory=signage-player
 RuntimeDirectoryMode=0700
+# Opstartscherm beëindigen maar het laatste beeld laten staan tot de player tekent.
+ExecStartPre=-+/bin/sh -c 'command -v plymouth >/dev/null 2>&1 && plymouth --ping 2>/dev/null && plymouth quit --retain-splash; exit 0'
 # Releases zonder startscript (1.0.x, na 'signage-admin rollback') starten de player direct.
 ExecStart=/bin/sh -c 'if [ -x /opt/signage/current/bin/signage-player-launch ]; then exec /opt/signage/current/bin/signage-player-launch; else exec /usr/bin/python3 -m signage.player.daemon; fi'
 # De daemon meldt zich elke halve seconde; blijft dat 60 s uit, dan herstart systemd de player.

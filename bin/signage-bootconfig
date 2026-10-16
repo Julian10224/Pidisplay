@@ -1,0 +1,113 @@
+#!/usr/bin/python3 -I
+"""signage-bootconfig — opstartinstellingen voor het opstartscherm (alleen voor install.sh/uninstall.sh).
+
+  signage-bootconfig enable BOOTMAP    'quiet splash …' aan cmdline.txt en 'disable_splash=1'
+                                       aan config.txt toevoegen (met back-up)
+  signage-bootconfig disable BOOTMAP   precies die toevoegingen weer weghalen
+
+Wat is toegevoegd staat in /etc/signage/bootconfig-added, zodat 'disable' alleen eigen
+wijzigingen terugdraait. Wordt NIET via de beheerwebsite aangeroepen.
+Uitvoer: 'changed' of 'unchanged' (exitcode 0), of een foutmelding (exitcode 1).
+"""
+
+import os
+import shutil
+import sys
+import time
+
+RECORD = "/etc/signage/bootconfig-added"
+CMDLINE_TOKENS = ["quiet", "splash", "plymouth.ignore-serial-consoles", "logo.nologo", "vt.global_cursor_default=0"]
+CONFIG_LINE = "disable_splash=1"
+CONFIG_COMMENT = "# Signage: geen regenboogscherm bij het opstarten (opstartscherm met logo)"
+
+
+def backup(path):
+    shutil.copy2(path, f"{path}.signage-backup-{time.strftime('%Y%m%d%H%M%S')}")
+
+
+def write(path, text):
+    tmp = path + ".signage-tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    shutil.copymode(path, tmp)
+    os.replace(tmp, path)
+
+
+def read_record():
+    try:
+        with open(RECORD, encoding="utf-8") as fh:
+            return [line.strip() for line in fh if line.strip()]
+    except OSError:
+        return []
+
+
+def main(argv):
+    if len(argv) != 2 or argv[0] not in ("enable", "disable"):
+        print(__doc__, file=sys.stderr)
+        return 2
+    mode, boot = argv
+    cmdline = os.path.join(boot, "cmdline.txt")
+    config = os.path.join(boot, "config.txt")
+    if not os.path.isfile(cmdline):
+        print(f"{cmdline} niet gevonden (geen Raspberry Pi?); opstartinstellingen ongewijzigd.")
+        return 0
+    with open(cmdline, encoding="utf-8") as fh:
+        line = fh.read().strip()
+    if "\n" in line or "root=" not in line:
+        print(f"{cmdline} heeft een onverwachte vorm; niet gewijzigd.", file=sys.stderr)
+        return 1
+    parts = line.split()
+    record = read_record()
+    changed = False
+
+    if mode == "enable":
+        add = [t for t in CMDLINE_TOKENS if t not in parts]
+        if add:
+            backup(cmdline)
+            write(cmdline, " ".join(parts + add) + "\n")
+            record += [f"cmdline:{t}" for t in add]
+            changed = True
+        if os.path.isfile(config):
+            with open(config, encoding="utf-8") as fh:
+                text = fh.read()
+            if not any(ln.strip().startswith("disable_splash") for ln in text.splitlines()):
+                backup(config)
+                write(config, text.rstrip("\n") + f"\n\n{CONFIG_COMMENT}\n[all]\n{CONFIG_LINE}\n")
+                record.append("config:disable_splash")
+                changed = True
+        if changed:
+            os.makedirs(os.path.dirname(RECORD), exist_ok=True)
+            with open(RECORD, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(record) + "\n")
+    else:
+        remove = {r.split(":", 1)[1] for r in record if r.startswith("cmdline:")}
+        if remove and any(p in remove for p in parts):
+            backup(cmdline)
+            write(cmdline, " ".join(p for p in parts if p not in remove) + "\n")
+            changed = True
+        if "config:disable_splash" in record and os.path.isfile(config):
+            with open(config, encoding="utf-8") as fh:
+                text = fh.read()
+            block = f"\n\n{CONFIG_COMMENT}\n[all]\n{CONFIG_LINE}\n"
+            if block in text:
+                backup(config)
+                write(config, text.replace(block, "\n"))
+                changed = True
+        try:
+            os.unlink(RECORD)
+        except FileNotFoundError:
+            pass
+
+    with open(cmdline, encoding="utf-8") as fh:   # nooit een kapotte opstartregel achterlaten
+        check = fh.read()
+    if "root=" not in check or check.count("\n") > 1:
+        print("cmdline.txt lijkt beschadigd; zet de back-up terug!", file=sys.stderr)
+        return 1
+    print("changed" if changed else "unchanged")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

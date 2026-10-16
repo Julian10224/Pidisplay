@@ -234,6 +234,9 @@ def register(app):
         conn.execute("UPDATE players SET name = ?, display_name = ?, rotation = ?, playlist_id = ? WHERE id = ?",
                      (name, display or "HDMI-scherm", rotation, playlist_id, row["id"]))
         st = state()
+        if row["kind"] == "local" and rotation != row["rotation"]:
+            from . import routes_splash   # opstartscherm meedraaien met de schermstand
+            routes_splash.apply_in_background(st)
         return jsonify(player=player_to_json(conn, _get_player(conn, row["id"]), db.get_settings(conn), st))
 
     @app.delete("/api/players/<player_id>")

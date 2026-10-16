@@ -166,6 +166,191 @@ def set_renderer(value):
     run("systemctl", "restart", "signage-player.service")
 
 
+SPLASH_DIR = "/usr/share/plymouth/themes/signage"
+SPLASH_DEFAULT_LOGO = "/opt/signage/current/app/signage/static/boot/logo-default.png"
+SPLASH_PLYMOUTH = """[Plymouth Theme]
+Name=Signage
+Description=Logo in het midden met een laadbalk (Signage)
+ModuleName=script
+
+[script]
+ImageDir=%(dir)s
+ScriptFile=%(dir)s/signage.script
+"""
+# Plymouth-script: logo gecentreerd, laadbalk eronder. Alles wordt berekend in het
+# 'inhoudsvlak' (zoals de player het scherm gebruikt) en daarna gedraaid naar het scherm,
+# zodat ook een staand scherm het logo rechtop toont. ROTATION komt uit de database.
+SPLASH_SCRIPT = """# Signage-opstartscherm (gemaakt door signage-priv; niet met de hand wijzigen)
+global.rot = %(rotation)d;
+global.sw = Window.GetWidth();
+global.sh = Window.GetHeight();
+Window.SetBackgroundTopColor(0, 0, 0);
+Window.SetBackgroundBottomColor(0, 0, 0);
+if (global.rot == 90 || global.rot == 270) { global.cw = global.sh; global.ch = global.sw; }
+else { global.cw = global.sw; global.ch = global.sh; }
+
+# Rechthoek in het inhoudsvlak (x, y, b, h) -> schermpositie en -afmetingen.
+fun place(spr, x, y, w, h) {
+    if (global.rot == 90) { spr.SetX(global.sw - y - h); spr.SetY(x); }
+    else if (global.rot == 180) { spr.SetX(global.sw - x - w); spr.SetY(global.sh - y - h); }
+    else if (global.rot == 270) { spr.SetX(y); spr.SetY(global.sh - x - w); }
+    else { spr.SetX(x); spr.SetY(y); }
+}
+fun sized(img, w, h) {
+    if (global.rot == 90 || global.rot == 270) return img.Scale(h, w);
+    return img.Scale(w, h);
+}
+
+logo_img = Image("logo.png");
+if (global.rot == 90 || global.rot == 270) { lw = logo_img.GetHeight(); lh = logo_img.GetWidth(); }
+else { lw = logo_img.GetWidth(); lh = logo_img.GetHeight(); }
+s = Math.Min(global.cw * 0.5 / lw, global.ch * 0.34 / lh);
+if (s > 1.5) s = 1.5;
+lw = Math.Int(lw * s);
+lh = Math.Int(lh * s);
+if (global.rot == 90 || global.rot == 270) logo_scaled = logo_img.Scale(lh, lw);
+else logo_scaled = logo_img.Scale(lw, lh);
+logo = Sprite(logo_scaled);
+lx = Math.Int((global.cw - lw) / 2);
+ly = Math.Int((global.ch - lh) / 2 - global.ch * 0.04);
+place(logo, lx, ly, lw, lh);
+logo.SetZ(10);
+
+global.bw = Math.Int(global.cw * 0.28);
+global.bh = Math.Int(Math.Max(4, global.ch * 0.008));
+global.bx = Math.Int((global.cw - global.bw) / 2);
+global.by = Math.Int(ly + lh + global.ch * 0.06);
+global.fill_src = Image("bar-fill.png");
+track = Sprite(sized(Image("bar-track.png"), global.bw, global.bh));
+place(track, global.bx, global.by, global.bw, global.bh);
+track.SetZ(10);
+global.fill = Sprite();
+global.fill.SetZ(11);
+
+if (Plymouth.GetMode() != "boot") { track.SetOpacity(0); }
+
+fun progress_cb(duration, progress) {
+    if (Plymouth.GetMode() != "boot") return;
+    w = Math.Int(global.bw * progress);
+    if (w < 1) w = 1;
+    if (w > global.bw) w = global.bw;
+    global.fill.SetImage(sized(global.fill_src, w, global.bh));
+    place(global.fill, global.bx, global.by, w, global.bh);
+}
+Plymouth.SetBootProgressFunction(progress_cb);
+"""
+
+
+def _local_rotation():
+    try:
+        conn = sqlite3.connect(os.path.join(DATA_DIR, "signage.db"), timeout=15)
+        row = conn.execute("SELECT rotation FROM players WHERE kind = 'local'").fetchone()
+        conn.close()
+        rot = int(row[0]) if row else 0
+    except (sqlite3.Error, TypeError, ValueError):
+        rot = 0
+    return rot if rot in (0, 90, 180, 270) else 0
+
+
+def _initramfs_in_use():
+    for d in BOOT_DIRS:
+        try:
+            if any(f.startswith(("initramfs", "initrd")) for f in os.listdir(d)):
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def splash(wait=False):
+    """Opstartscherm (Plymouth-thema 'signage') bijwerken: logo uit /var/lib/signage/boot/logo.png
+    (gemaakt door de server) of het standaardlogo, gedraaid volgens de schermstand."""
+    if not os.path.isdir("/usr/share/plymouth/themes"):
+        die("Het opstartscherm (plymouth) is niet geïnstalleerd; installeer opnieuw zonder --no-splash.")
+    import hashlib
+    import io
+    try:
+        from PIL import Image
+    except ImportError:
+        die("python3-pil ontbreekt.")
+    rot = _local_rotation()
+    src = os.path.join(DATA_DIR, "boot", "logo.png")
+    if not os.path.isfile(src) or os.path.getsize(src) > 8 * 1024 * 1024:
+        src = SPLASH_DEFAULT_LOGO
+    Image.MAX_IMAGE_PIXELS = 20_000_000
+    try:
+        with Image.open(src) as im:
+            if im.format != "PNG" or im.width > 4000 or im.height > 4000:
+                raise ValueError("geen geldig PNG-bestand")
+            im = im.convert("RGBA")
+    except Exception:  # noqa: BLE001  (onbruikbaar logo: standaardlogo)
+        with Image.open(SPLASH_DEFAULT_LOGO) as im:
+            im = im.convert("RGBA")
+    im.thumbnail((1200, 1200))
+    if rot:
+        im = im.rotate(-rot, expand=True)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    files = {"logo.png": buf.getvalue()}
+    for name, rgba in (("bar-track.png", (255, 255, 255, 46)), ("bar-fill.png", (255, 255, 255, 235))):
+        b = io.BytesIO()
+        Image.new("RGBA", (1, 1), rgba).save(b, "PNG")
+        files[name] = b.getvalue()
+    files["signage.plymouth"] = (SPLASH_PLYMOUTH % {"dir": SPLASH_DIR}).encode()
+    files["signage.script"] = (SPLASH_SCRIPT % {"rotation": rot}).encode()
+    digest = hashlib.sha256(b"".join(k.encode() + v for k, v in sorted(files.items()))).hexdigest()
+    stamp = os.path.join(SPLASH_DIR, ".signage-hash")
+    try:
+        unchanged = open(stamp, encoding="utf-8").read().strip() == digest
+    except OSError:
+        unchanged = False
+    conf = "/etc/plymouth/plymouthd.conf"
+    try:
+        conf_text = open(conf, encoding="utf-8").read()
+    except OSError:
+        conf_text = ""
+    theme_set = re.search(r"(?m)^\s*Theme\s*=\s*signage\s*$", conf_text) is not None
+    if unchanged and theme_set:
+        print("Opstartscherm is al actueel.")
+        return
+    os.makedirs(SPLASH_DIR, exist_ok=True)
+    for name, data in files.items():
+        tmp = os.path.join(SPLASH_DIR, "." + name + ".tmp")
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, os.path.join(SPLASH_DIR, name))
+    if not theme_set:
+        if re.search(r"(?m)^\s*Theme\s*=", conf_text):
+            conf_text = re.sub(r"(?m)^\s*Theme\s*=.*$", "Theme=signage", conf_text)
+        elif re.search(r"(?m)^\[Daemon\]", conf_text):
+            conf_text = re.sub(r"(?m)^\[Daemon\]\s*$", "[Daemon]\nTheme=signage", conf_text, count=1)
+        else:
+            conf_text = conf_text.rstrip("\n") + ("\n" if conf_text else "") + "[Daemon]\nTheme=signage\n"
+        os.makedirs(os.path.dirname(conf), exist_ok=True)
+        with open(conf + ".signage-tmp", "w", encoding="utf-8") as fh:
+            fh.write(conf_text)
+        os.chmod(conf + ".signage-tmp", 0o644)
+        os.replace(conf + ".signage-tmp", conf)
+    with open(stamp, "w", encoding="utf-8") as fh:
+        fh.write(digest + "\n")
+    # Met een initramfs start Plymouth daaruit: die moet het nieuwe thema bevatten.
+    if _initramfs_in_use() and os.path.exists("/usr/sbin/update-initramfs"):
+        if wait:   # installatiescript: wachten, zodat niemand halverwege herstart
+            res = subprocess.run(["/usr/sbin/update-initramfs", "-u"], capture_output=True, text=True, timeout=900)
+            if res.returncode != 0:
+                die("update-initramfs mislukt: " + (res.stderr or res.stdout).strip()[-500:])
+            print("Opstartscherm bijgewerkt (ook in het opstartbestand); zichtbaar bij de volgende start.")
+            return
+        if run("systemctl", "is-active", "--quiet", "signage-splash.service", check=False).returncode != 0:
+            run("systemd-run", "--quiet", "--collect", "--unit=signage-splash",
+                "--description=Signage: opstartscherm in initramfs zetten", "/usr/sbin/update-initramfs", "-u")
+        print("Opstartscherm bijgewerkt; het wordt nu in het opstartbestand gezet (1–2 minuten) en is "
+              "zichtbaar bij de volgende start.")
+    else:
+        print("Opstartscherm bijgewerkt; zichtbaar bij de volgende start.")
+
+
 def update():
     """Software bijwerken vanaf GitHub (bron vast in /etc/signage/signage.ini, [update]).
 
@@ -201,8 +386,13 @@ def main(argv):
         "player": (1, player),
         "set-renderer": (1, set_renderer),
         "update": (0, update),
+        "splash": (0, splash),
+        "splash-sync": (0, lambda: splash(wait=True)),
         "restart-server": (0, lambda: delayed("/usr/bin/systemctl", "restart", "signage-server.service")),
-        "reboot": (0, lambda: delayed("/usr/bin/systemctl", "reboot")),
+        # Eerst een lopende update van het opstartbestand (opstartscherm) laten afronden.
+        "reboot": (0, lambda: delayed("/bin/sh", "-c", "for i in $(seq 1 300); do "
+                                      "systemctl is-active --quiet signage-splash.service || break; sleep 2; done; "
+                                      "exec /usr/bin/systemctl reboot")),
     }
     if action not in table:
         die("Onbekende actie.", 2)

@@ -1340,6 +1340,43 @@ function Section({ id, title, note, children }) {
   return html`<section class="panel" id=${id}><h2>${title}</h2>${note && html`<p class="section-note" style="margin-top:4px">${note}</p>`}${children}</section>`;
 }
 
+/* Opstartscherm: het logo dat (met een laadbalk eronder) verschijnt als de Raspberry Pi start. */
+function SplashSection({ priv }) {
+  const [sp, setSp] = useState(null);
+  const [picker, setPicker] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api('GET', '/api/system/splash').then((r) => setSp(r.splash)).catch(() => {}); }, []);
+  const save = async (mediaId) => {
+    setBusy(true);
+    try { const r = await api('PUT', '/api/system/splash', { media_id: mediaId }); setSp(r.splash); toast(r.message); }
+    catch (e) { fail(e); } finally { setBusy(false); }
+  };
+  return html`<${Section} id="opstartscherm" title="Opstartscherm"
+      note="Wat er op het scherm staat terwijl de Raspberry Pi opstart: je logo in het midden met een laadbalk eronder, tot de playlist begint.">
+    ${!sp ? html`<p class="muted">Laden…</p>` : html`<div class="splash-setting">
+      <div class="splash-preview" aria-label="Voorbeeld van het opstartscherm">
+        <img src=${sp.preview_url} alt="" /><div class="splash-bar"><span></span></div>
+      </div>
+      <div class="stack" style="gap:10px">
+        <div>${sp.logo ? html`Logo: <b>${sp.logo.name || 'onbekend'}</b>${sp.logo.deleted ? html` <span class="muted small">(uit Media verwijderd; blijft in gebruik)</span>` : ''}`
+          : html`<span class="muted">Standaardlogo</span>`}</div>
+        <div class="row">
+          <button class="btn primary" disabled=${busy} onClick=${() => setPicker(true)}>Logo kiezen…</button>
+          ${sp.logo && html`<button class="btn ghost" disabled=${busy} onClick=${() => save(null)}>Standaardlogo</button>`}
+        </div>
+        ${busy && html`<p class="muted small">Opstartscherm bijwerken…</p>`}
+        ${!sp.installed && html`<p class="muted small">Het opstartscherm is op deze Raspberry Pi nog niet geïnstalleerd. Werk de software bij
+          (of voer het installatiescript opnieuw uit); je keuze wordt dan meegenomen.</p>`}
+        <p class="muted small">Gebruik bij voorkeur een PNG met transparante achtergrond. Het logo draait mee met de schermstand
+          en is zichtbaar bij de volgende start${priv ? '' : ' (na het installatiescript)'}.</p>
+      </div></div>`}
+    ${picker && html`<${MediaPicker} single kind="image" title="Logo voor het opstartscherm" confirmLabel="Gebruiken"
+      emptyText="Er staan nog geen afbeeldingen in Media. Upload eerst je logo (bij voorkeur als PNG met transparante achtergrond)."
+      note="Het logo komt in het midden van het scherm op een zwarte achtergrond, met een laadbalk eronder."
+      onClose=${() => setPicker(false)} onPick=${(ms) => ms[0] && save(ms[0].id)} />`}
+  </${Section}>`;
+}
+
 /* Software bijwerken vanaf GitHub. Tijdens de update herstart de server; deze sectie blijft
    de status opvragen en laadt de pagina opnieuw zodra de nieuwe versie draait. */
 function UpdateSection() {
@@ -1492,7 +1529,7 @@ function SettingsPage({ user, onLogout }) {
     <div class="settings">
       <nav class="settings-nav" aria-label="Onderdelen">
         ${[['algemeen', 'Algemeen'], ['weergave', 'Weergave'], ['netwerk', 'Netwerk'], ['tijd', 'Tijd'], ['backup', 'Back-up'],
-          ['logboek', 'Logboeken'], ['update', 'Bijwerken'], ['systeem', 'Systeem'], ['account', 'Account']].map(([k, v]) =>
+          ['opstartscherm', 'Opstartscherm'], ['logboek', 'Logboeken'], ['update', 'Bijwerken'], ['systeem', 'Systeem'], ['account', 'Account']].map(([k, v]) =>
           html`<a href=${'#/instellingen'} onClick=${(e) => { e.preventDefault(); document.getElementById(k).scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>${v}</a>`)}
       </nav>
       <div class="stack">
@@ -1561,6 +1598,8 @@ function SettingsPage({ user, onLogout }) {
           <p class="section-note" style="margin-top:12px">Schermstand (liggend/staand) stel je per scherm in onder <a href="#/schermen">Schermen</a>.
             Decodering en audio-uitgang staan in /etc/signage/player.ini.</p>
         </${Section}>
+
+        <${SplashSection} priv=${priv} />
 
         <${Section} id="netwerk" title="Netwerk" note="De beheeromgeving is alleen bereikbaar vanaf het lokale netwerk. Netwerkverbinding, Wi-Fi en SSH worden hier niet gewijzigd.">
           <dl class="facts" style="margin-bottom:14px">

@@ -84,12 +84,13 @@ def start(unit):
         subprocess.run(["chown", f"{user}:{user}", d])
         env["RUNTIME_DIRECTORY"] = d
     for pre in cfg["ExecStartPre"]:
-        as_root = pre.startswith("+")
-        cmd = shlex.split(pre.lstrip("+"))
+        prefix = pre[:len(pre) - len(pre.lstrip("+-"))]
+        as_root, ignore = "+" in prefix, "-" in prefix
+        cmd = shlex.split(pre.lstrip("+-"))
         if not as_root and user != "root":
             cmd = ["runuser", "-u", user, "--"] + cmd
         r = subprocess.run(cmd, env=env)
-        if r.returncode != 0:
+        if r.returncode != 0 and not ignore:
             print(f"ExecStartPre faalde voor {unit}", file=sys.stderr)
             return 1
     cmd = shlex.split(cfg["ExecStart"])
