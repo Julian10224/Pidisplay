@@ -121,7 +121,8 @@ staat alleen op het fysieke scherm (en in de uitvoer van het installatiescript).
 van de playlist), status van server en player, welke weergave actief is (browser of mpv) met
 het percentage overgeslagen videoframes of de gebruikte decoder, vrije opslag, uptime,
 temperatuur, meldingen en de belangrijkste instellingen. Je kunt hier direct een andere
-playlist kiezen.
+playlist kiezen, en met **Vorige** en **Volgende** het echte scherm door de playlist laten
+klikken (zie *Live bediening* hieronder).
 
 **Media** — het overzicht van alles wat op de Pi staat (de 'assets'): foto's, video's,
 HTML-pagina's en logo's. Bovenaan staat hoeveel ruimte de media innemen, hoeveel er vrij is,
@@ -148,6 +149,28 @@ volgorde en schaalmodi.
 **Schermen** — de server, de players en het scherm per player: online-status, laatste
 contact, wat er speelt, of de HDMI-aansluiting een scherm ziet en met welke resolutie,
 schermstand (liggend/staand/ondersteboven), weergave en welke playlist de player volgt.
+Per online player staan hier ook de knoppen **Vorige** en **Volgende**.
+
+**Live bediening (snel alles testen)** — met *Volgende* en *Vorige* op het dashboard springt
+het echte scherm meteen naar het volgende of vorige item; klik op een beeldje in de
+filmstrip om dat item direct te tonen. De pijltjestoetsen ← en → werken ook (niet terwijl
+je in een invoerveld of keuzelijst zit). Zo loop je in een paar seconden een hele playlist
+door om te zien of alles goed op het scherm staat. Na elke klik ververst het dashboard een
+paar seconden lang twee keer per seconde, zodat je ziet wat er werkelijk op het scherm staat.
+
+- Zonder *Met overgang* wisselt het scherm direct, zonder overgangsvideo (snelst). Met
+  *Met overgang* speelt eerst de overgang na het huidige item, zodat je ook de overgangen
+  kunt bekijken. Klik je tijdens een overgang, dan stopt die en verschijnt het gekozen item.
+- Het nieuwe item wordt net als normaal eerst voorbereid en pas getoond als het klaar is:
+  ook bij snel klikken geen zwart beeld (browserweergave).
+- Na een klik speelt de playlist gewoon verder vanaf dat item, met de normale duur.
+  Er wordt niets opgeslagen; de playlist zelf verandert niet.
+- *Vorige* bij willekeurige volgorde gaat naar het item dat écht als laatste speelde.
+  *Volgende* vanaf het laatste item van een playlist die *één keer en laatste laten staan*
+  speelt, begint weer bij het eerste item.
+- Het werkt voor de player op deze Pi en voor externe players (vanaf versie 1.3), alleen
+  als de player online is. Een opdracht die niet binnen 15 seconden bij de player is, wordt
+  niet meer uitgevoerd, zodat een scherm na een netwerkstoring niet ineens verspringt.
 
 **Instellingen** — systeemnaam, standaardplaylist, standaardduur, volume, **schaalmodus**,
 **weergave/kioskmodus** (automatisch, browser of mpv), player herstarten/uitzetten, hostnaam, tijdzone, tijdsynchronisatie, tijd handmatig instellen,
@@ -311,6 +334,15 @@ niets afspeelbaar ─▶ STANDBY ─(30 s of nieuwe playlist)─▶ LOADING_NEXT
   lopende overgang, zodat niets halverwege wordt afgebroken.
 - Elke asynchrone stap is gekoppeld aan een 'generatie'; verouderde stappen na een wijziging
   worden genegeerd, zodat er geen raceconditions ontstaan.
+- **Live bediening**: de server houdt opdrachten (vorige/volgende/naar item) alleen in het
+  geheugen. De player haalt ze op via `GET /api/player/v1/control` (long polling: het verzoek
+  wacht tot er een opdracht is, maximaal 25 s), zodat een klik binnen een fractie van een
+  seconde aankomt zonder de server elke seconde te bevragen. Bij de browserweergave geeft de
+  daemon de opdracht op dezelfde manier door aan de playerpagina (`/cmd`, alleen 127.0.0.1).
+  De opdracht start een nieuwe generatie en laat het gekozen item via de normale weg
+  verschijnen. Na elke wissel van item meldt de player zich direct bij de server, zodat de
+  website meteen klopt. Een volgnummer plus een kenmerk per serverstart ('epoch') zorgen
+  dat een opdracht nooit twee keer of na een herstart nog eens wordt uitgevoerd.
 
 **Overige keuzes**
 
@@ -542,7 +574,7 @@ journalctl -u signage-player -n 100
 Er was geen toegang tot een Raspberry Pi of het aangesloten scherm. Getest is in een
 Linux-testomgeving (x86_64, Python 3.13 zoals Raspberry Pi OS Trixie):
 
-1. **Automatische tests** — `python3 -m pytest tests/` — **87 tests, alle geslaagd**:
+1. **Automatische tests** — `python3 -m pytest tests/` — **104 tests, alle geslaagd**:
    - `test_api.py` (27): login, CSRF, uploads, playlists, player-API, back-up/herstel;
    - `test_v11.py` (15): migratie van een echte 1.0-database, HTML-bestanden en ZIP's
      (inclusief path traversal, absolute paden, symlinks, verboden types, ZIP-bom),
@@ -552,11 +584,20 @@ Linux-testomgeving (x86_64, Python 3.13 zoals Raspberry Pi OS Trixie):
    - `test_v12.py` (8): migratie 2 → 3 en 1 → 3, willekeurige volgorde en logo in de
      playerconfiguratie, logo alleen als PNG, ontbrekend of verwijderd logo, media-overzicht en
      meerdere bestanden tegelijk verwijderen;
+   - `test_v13.py` (9): live bediening — API-validatie (offline, oude player, onbekend item,
+     CSRF), long polling met epoch en verlopen opdrachten, de wachtende player wordt direct
+     gewekt, mpv-weergave (vorige/volgende/naar item, met en zonder overgang, tijdens een
+     overgang, willekeurige volgorde, 'laatste blijft staan') en van begin tot eind:
+     website → server → player → status terug in de website, en de lokale
+     opdrachtenbuffer van de browserweergave;
    - `test_player.py` (13): mpv-weergave tegen een nagebootste mpv (volgorde, kapotte en
      ontbrekende bestanden, standby, vastgelopen mpv, overgangen, schaalmodi, HTML overslaan,
      offline doorspelen, cache na herstart);
-   - `test_browser_player.py` (24): de echte playerpagina in Chromium (headless) met
-     schermafbeeldingen en pixelmetingen.
+   - `test_browser_player.py` (32): de echte playerpagina in Chromium (headless) met
+     schermafbeeldingen en pixelmetingen; in 1.3 ook de live bediening (doorklikken zonder
+     zwart beeld, heel snel klikken, overgangen, willekeurige volgorde, oude opdrachten worden
+     na herladen niet opnieuw uitgevoerd, status direct naar de daemon) en de hele keten
+     website → server → browserweergave-daemon → playerpagina → status terug.
 2. **Browserweergave** in Chromium: schaalmodi voor foto, video en HTML (vullen = geen zwart en
    proportioneel, passend = zwarte randen, uitrekken = vervormd), kleine foto opgeschaald,
    HTML vult het venster, HTML met vast ontwerpformaat in alle drie modi, schermrotatie 90°,
@@ -576,6 +617,9 @@ Linux-testomgeving (x86_64, Python 3.13 zoals Raspberry Pi OS Trixie):
 5. **Echte installatie en upgrade** met `install.sh` (systemctl nagebootst): 1.0.0 → 1.1.0 met
    bestaande gegevens: pre-migration-back-up, schema 2, playlists behouden, afspeelversies
    bijgewerkt, database intact; daarna `tests/check_installed_v11.py` met de echte mpv: 13/13.
+   Upgrade 1.2.0 → 1.3.0 van hetzelfde geïnstalleerde systeem met de echte mpv:
+   `tests/check_installed_v13.py` 10/10 (klik → zichtbaar in de website in 0,2–0,4 s),
+   `check_installed_v12.py` daarna nog steeds 10/10, en rollback naar 1.2.0 en terug.
    Uit 1.0: installatie, herinstallatie, `--offline`, rollback, uninstall, harde kill
    (player speelt binnen seconden verder uit de cache), wachtwoordherstel via de SD-kaart,
    duurtest (geheugen stabiel).
@@ -626,6 +670,9 @@ zijn opnieuw getest en geslaagd; zie `CHANGELOG.md`.
 5. Dashboard: hoeveel procent videoframes wordt overgeslagen? (Boven ~5% → 720p-video's.)
 6. Haal de internetverbinding weg (lokaal netwerk blijft): werkt alles nog?
 7. Trek de stekker eruit en weer erin: komt de playlist vanzelf terug?
+8. Klik op het dashboard een paar keer op *Volgende* en *Vorige* en op een beeldje in de
+   filmstrip: volgt het scherm binnen een seconde, zonder zwart beeld? Doe het ook met
+   *Met overgang* aan.
 
 ---
 
@@ -648,3 +695,8 @@ zijn opnieuw getest en geslaagd; zie `CHANGELOG.md`.
 - HTML-pagina's kunnen geen geluid laten horen tenzij ze zelf media afspelen; interactie
   (aanraken, toetsenbord) wordt niet ondersteund.
 - Eén beheeraccount, geen tijdschema's, HTTP zonder TLS (vertrouwd lokaal netwerk).
+- **Live bediening** werkt alleen als de player online is en versie 1.3 of nieuwer draait. In
+  de mpv-weergave kan bij snel doorklikken heel kort het vorige of een zwart frame te zien
+  zijn (geen voorladen). Elke externe player houdt één verbinding open voor opdrachten; de
+  server laat hooguit 3 verbindingen tegelijk wachten (bij 6 serverthreads), daarboven vragen
+  players elke 2 seconden.

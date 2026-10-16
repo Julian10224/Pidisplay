@@ -1,5 +1,40 @@
 # Wijzigingen
 
+## 1.3.0 — live bediening: het scherm vanuit de website door de playlist laten klikken
+
+Nieuw:
+
+- **Vorige / Volgende** op het dashboard en op *Schermen*: het echte scherm springt direct
+  naar het vorige of volgende item. **Klik op een beeldje** in de filmstrip om dat item meteen
+  te tonen; **← en →** werken ook. Zo loop je in een paar seconden een hele playlist door.
+- **Met overgang** (aan/uit, wordt onthouden in je browser): direct wisselen, of eerst de
+  overgangsvideo laten spelen om ook de overgangen te testen.
+- Het dashboard ververst na een klik even twee keer per seconde en markeert het juiste item
+  in de filmstrip, ook bij willekeurige volgorde (op item, niet meer op bestand).
+- Players melden zich direct na elke wissel van item bij de server (niet alleen elke 15 s);
+  de website laat dus sneller zien wat er op het scherm staat.
+
+Hoe: opdrachten blijven alleen in het geheugen van de server en worden door de player met
+long polling opgehaald (`GET /api/player/v1/control`), bij de browserweergave via de daemon
+doorgegeven aan de playerpagina (`/cmd`). Volgnummer + epoch per serverstart: nooit dubbel
+uitgevoerd, niet na een herstart; opdrachten ouder dan 15 s vervallen. Werkt in de browser- en
+mpv-weergave, met overgangen, willekeurige volgorde, herhaalinstellingen en een bewerkte
+playlist. De playlist zelf verandert niet.
+
+API: nieuw `POST /api/players/<id>/control` met `{"action": "next"|"prev"|"goto", "item_id",
+"transition"}` (409 als de player offline is of te oud), `GET /api/player/v1/control`; de
+playerconfiguratie bevat per item `item_id`; de status van een player bevat `control` en
+`current.item_id`. Geen databasemigratie; terugdraaien naar 1.2.0 kan zonder meer.
+
+Beveiliging: de lokale playerserver (browserweergave) weigert nu een statusmelding met een
+andere Origin dan de playerpagina, zodat een HTML-pagina geen valse status kan sturen.
+
+Tests: 104 automatische tests geslaagd (nieuw: `test_v13.py` en 8 browsertests, waaronder de
+hele keten tot en met de browserweergave), upgrade
+1.2.0 → 1.3.0 van een geïnstalleerd systeem met de echte mpv en `tests/check_installed_v13.py`
+10/10 (klik → zichtbaar in de website in 0,2–0,4 s), rollback naar 1.2.0 en terug, en de
+beheerwebsite (knoppen, filmstrip, pijltjestoetsen, *Schermen*, offline, telefoonbreedte).
+
 ## 1.2.0 — willekeurige volgorde, logo per item en media-overzicht
 
 Nieuw:

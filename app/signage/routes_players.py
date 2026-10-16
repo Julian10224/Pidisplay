@@ -10,7 +10,7 @@ import secrets
 import time
 import uuid
 
-from flask import jsonify, request, send_file
+from flask import g, jsonify, request, send_file
 
 from . import __version__, db, media
 from .app import ApiError, body, get_db, hash_token, refresh_standby, state
@@ -20,6 +20,9 @@ log = logging.getLogger("signage.players")
 
 ONLINE_AFTER = 45        # seconden zonder heartbeat => offline
 LAST_SEEN_WRITE = 300    # schrijf last_seen hooguit eens per 5 minuten (SD-kaart sparen)
+CONTROL_ACTIONS = ("next", "prev", "goto")
+CONTROL_TTL = 15         # een opdracht die zo lang onderweg is, wordt niet meer uitgevoerd
+CONTROL_WAIT = 25        # maximale wachttijd van de player bij het ophalen van opdrachten
 
 
 def effective_playlist_id(conn, player_row, settings=None):
@@ -71,7 +74,7 @@ def _items_payload(conn, cfg, pl_row, settings, transitions, logos=None):
         if not media.playback_available(cfg, it):
             continue  # ontbrekende bestanden worden nooit naar de player gestuurd
         entry = {
-            "media_id": it["id"], "name": it["name"], "kind": it["kind"],
+            "media_id": it["id"], "item_id": it["item_id"], "name": it["name"], "kind": it["kind"],
             "scale": it["item_scale_mode"] or settings.get("scale_mode", "cover"),
             "duration": None if it["kind"] == "video" else (it["item_duration"] or settings["default_image_duration"]),
             "video_duration": it["duration"] if it["kind"] == "video" else None,
@@ -242,6 +245,8 @@ def register(app):
         conn.execute("DELETE FROM players WHERE id = ?", (row["id"],))
         with state().lock:
             state().live.pop(row["id"], None)
+        with state().control_cv:
+            state().control.pop(row["id"], None)
         return jsonify(ok=True)
 
     @app.post("/api/players/<player_id>/token")
@@ -254,7 +259,88 @@ def register(app):
         conn.execute("UPDATE players SET token_hash = ? WHERE id = ?", (hash_token(token), row["id"]))
         return jsonify(token=token)
 
+    @app.post("/api/players/<player_id>/control")
+    def players_control(player_id):
+        """Live bediening: het scherm direct naar het vorige/volgende item of naar een
+        bepaald item laten gaan. De player haalt de opdracht binnen een seconde op."""
+        conn = get_db()
+        row = _get_player(conn, player_id)
+        data = body()
+        action = data.get("action")
+        if action not in CONTROL_ACTIONS:
+            raise ApiError(400, "Onbekende opdracht.")
+        cmd = {"action": action, "transition": bool(data.get("transition"))}
+        if action == "goto":
+            item_id = data.get("item_id")
+            if not isinstance(item_id, int) or isinstance(item_id, bool):
+                raise ApiError(400, "Geef aan naar welk item het scherm moet gaan.")
+            pid = effective_playlist_id(conn, row)
+            if pid is None or conn.execute("SELECT 1 FROM playlist_items WHERE id = ? AND playlist_id = ?",
+                                           (item_id, pid)).fetchone() is None:
+                raise ApiError(409, "Dit item staat niet (meer) in de playlist die op dit scherm speelt.")
+            cmd["item_id"] = item_id
+        st = state()
+        status, online = live_status(st, row["id"])
+        if not online:
+            raise ApiError(409, "Dit scherm is niet online; de opdracht is niet verstuurd.")
+        if not (status or {}).get("control"):
+            raise ApiError(409, "Deze player ondersteunt live bediening nog niet. Werk de player bij naar 1.3.")
+        now = time.time()
+        with st.control_cv:
+            box = st.control.setdefault(row["id"], {"seq": 0, "cmds": []})
+            box["seq"] += 1
+            cmd.update(seq=box["seq"], at=now)
+            box["cmds"] = [c for c in box["cmds"] if now - c["at"] < CONTROL_TTL][-19:] + [cmd]
+            st.control_cv.notify_all()
+        return jsonify(ok=True, seq=cmd["seq"])
+
     # -- endpoints voor players -------------------------------------------------
+    @app.get("/api/player/v1/control")
+    def player_control():
+        """Opdrachten voor de live bediening ophalen (long polling).
+
+        De player stuurt het laatst ontvangen volgnummer mee ('after') en het 'epoch' van de
+        server. Zonder of met een verouderd epoch krijgt hij alleen het huidige volgnummer
+        terug, zodat oude opdrachten nooit (opnieuw) worden uitgevoerd. Er wachten nooit meer
+        verzoeken tegelijk dan de server aankan; daarboven antwoordt de server direct."""
+        st = state()
+        conn = get_db()
+        pid = _player_from_token(conn)["id"]
+        g.pop("db").close()   # geen databaseverbinding vasthouden tijdens het wachten
+        epoch = request.args.get("epoch", "")
+        try:
+            after = int(request.args.get("after", ""))
+        except ValueError:
+            after = None
+        try:
+            wait = max(0.0, min(float(request.args.get("wait", CONTROL_WAIT)), CONTROL_WAIT))
+        except ValueError:
+            wait = CONTROL_WAIT
+
+        def seq_now():
+            return (st.control.get(pid) or {}).get("seq", 0)
+
+        retry = 0
+        with st.control_cv:
+            seq = seq_now()
+            if epoch != st.control_epoch or after is None or after > seq:
+                return jsonify(epoch=st.control_epoch, seq=seq, commands=[], retry=0)
+            if wait and seq == after:
+                if st.control_waiters < max(1, st.cfg.threads - 3):
+                    st.control_waiters += 1
+                    try:
+                        st.control_cv.wait_for(lambda: seq_now() > after, timeout=wait)
+                    finally:
+                        st.control_waiters -= 1
+                else:
+                    retry = 2   # druk: de player vraagt over 2 s opnieuw
+            now = time.time()
+            box = st.control.get(pid) or {"seq": 0, "cmds": []}
+            cmds = [{"seq": c["seq"], "action": c["action"], "transition": c["transition"],
+                     "item_id": c.get("item_id"), "age": round(now - c["at"], 2)}
+                    for c in box["cmds"] if c["seq"] > after and now - c["at"] < CONTROL_TTL]
+            return jsonify(epoch=st.control_epoch, seq=box["seq"], commands=cmds, retry=retry)
+
     @app.get("/api/player/v1/config")
     def player_config():
         cfg = state().cfg
@@ -280,8 +366,13 @@ def register(app):
             raise ApiError(400, "Verwacht JSON.")
         allowed = ("state", "current", "playlist_id", "revision", "mpv_restarts", "errors", "display",
                    "version", "uptime", "message", "renderer", "phase", "video_stats", "viewport", "hwdec",
-                   "renderer_note")
+                   "renderer_note", "control")
         status = {k: data.get(k) for k in allowed if k in data}
+        if "control" in status:
+            c = status["control"] if isinstance(status["control"], dict) else {}
+            last = c.get("last") if isinstance(c.get("last"), dict) else None
+            status["control"] = {"v": c.get("v"), "last": {k: (str(last.get(k))[:200] if last.get(k) is not None else None)
+                                                           for k in ("seq", "action", "result")} if last else None}
         if isinstance(status.get("errors"), list):
             status["errors"] = [str(e)[:300] for e in status["errors"][-10:]]
         now = time.time()

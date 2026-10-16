@@ -44,6 +44,13 @@ class State:
         self.standby_sha = None
         self.standby_key = None
         self.failed_logins = {}  # ip -> [count, locked_until]
+        # Live bediening (vorige/volgende/naar item): opdrachten per player, alleen in het
+        # geheugen. Het 'epoch' verandert bij elke serverstart, zodat een player na een
+        # herstart nooit oude opdrachten uitvoert.
+        self.control = {}        # player_id -> {"seq": n, "cmds": [...]}
+        self.control_cv = threading.Condition()
+        self.control_epoch = secrets.token_hex(4)
+        self.control_waiters = 0
 
     # -- privileged helper --------------------------------------------------
     def priv(self, *args, timeout=30):

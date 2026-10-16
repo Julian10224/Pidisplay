@@ -18,6 +18,11 @@ twee keer achter elkaar of uit zichzelf speelt.
 Willekeurige volgorde: bij elke nieuwe ronde wordt de lijst geschud (elk item één keer, het
 eerste item nooit gelijk aan het vorige). Logo's worden als mpv-overlay linksboven getoond
 (mpv 'overlay-add'); tijdens een overgang en op het standby-scherm is er geen logo.
+
+Live bediening (vanuit de website): 'next', 'prev' en 'goto' worden in de hoofdlus
+uitgevoerd, dus nooit tegelijk met een andere toestandswissel. Het gekozen item wordt als
+'forced' doelwit klaargezet en via de normale weg (go_next, eventueel na de overgang)
+geladen; daarna loopt de playlist gewoon verder vanaf dat item.
 """
 
 import hashlib
@@ -92,7 +97,11 @@ class MpvRenderer:
         self.overlay = None          # huidige logo-overlay (of None)
         self.screen_size = None
         self.history = []            # (tijd, toestand, naam) voor tests en diagnose
-        self.syncer = Syncer(pcfg, self.cache_dir, self.queue, self.status)
+        self.commands = queue.Queue()  # opdrachten van de live bediening
+        self.forced = None           # (lijst, index, fallback) dat als volgende moet spelen
+        self.played = []             # afgespeelde posities, voor 'vorige' bij willekeurige volgorde
+        self.last_control = None
+        self.syncer = Syncer(pcfg, self.cache_dir, self.queue, self.status, on_command=self.commands.put)
 
     # Compatibiliteit met 1.0 (tests en logboeken gebruiken 'mode').
     @property
@@ -115,6 +124,8 @@ class MpvRenderer:
         self.state = state
         self.history.append((time.time(), state, name))
         self.history = self.history[-200:]
+        if state in ("PLAYING", "PLAYING_TRANSITION", "HOLD", "STANDBY") and hasattr(self, "syncer"):
+            self.syncer.kick()   # website direct laten zien wat er op het scherm staat
 
     def status(self):
         with self.lock:
@@ -133,6 +144,7 @@ class MpvRenderer:
                              "name": ("Overgang: " + self.transition.get("name", "")) if self.state == "PLAYING_TRANSITION"
                              else cur.get("name"),
                              "kind": cur.get("kind"), "index": self.index, "total": len(self.items),
+                             "item_id": cur.get("item_id"),
                              "transition": self.state == "PLAYING_TRANSITION"}
                             if cur and (showing or self.state == "PLAYING_TRANSITION") else None),
                 "playlist_id": playlist.get("id"),
@@ -144,6 +156,7 @@ class MpvRenderer:
                 "version": __version__,
                 "uptime": time.time() - self.started,
                 "message": self.message or self.syncer.last_error,
+                "control": {"v": 1, "last": self.last_control},
             }
 
     # -- configuratie --------------------------------------------------------------
@@ -173,6 +186,8 @@ class MpvRenderer:
             self.fallback_active = False
             self.index = -1
             self.consecutive_failures = 0
+            self.forced = None
+            self.played = []
             self.apply_properties()
             if self.mpv.alive():
                 self.go_next()
@@ -368,6 +383,9 @@ class MpvRenderer:
         except MpvError as exc:
             self.restart_mpv(str(exc))
             return
+        if not (self.played and self.played[-1][0] is self.items and self.played[-1][1] == self.index):
+            self.played.append((self.items, self.index, self.fallback_active))
+            self.played = self.played[-50:]
         self.set_state("PLAYING", item.get("name"))
         if item.get("kind") == "image":
             self.deadline = self.loaded_at + float(item.get("duration") or 10)
@@ -385,6 +403,12 @@ class MpvRenderer:
 
     def _next_position(self):
         """Volgende (index, lijst-wissel) inclusief het toepassen van een bijgewerkte playlist."""
+        if self.forced is not None:          # gekozen via de live bediening
+            items, idx, fb = self.forced
+            self.forced = None
+            self.items = items
+            self.fallback_active = fb
+            return idx
         if self.pending is not None:
             new = self.pending
             self.pending = None
@@ -400,6 +424,7 @@ class MpvRenderer:
             self.items = new_items
             self.fallback_active = False
             self.consecutive_failures = 0
+            self.played = []
             log.info("Bijgewerkte playlist actief (%d item(s)).", len(new_items))
             if nxt >= len(new_items):
                 return self._wrap()
@@ -461,7 +486,8 @@ class MpvRenderer:
         self.consecutive_failures = 0
         mode = ((self.cfg or {}).get("playlist") or {}).get("repeat_mode", "loop")
         is_last = self.index >= len(self.items) - 1
-        if is_last and mode == "once_hold_last" and not self.fallback_active and self.pending is None:
+        if (is_last and mode == "once_hold_last" and not self.fallback_active and self.pending is None
+                and self.forced is None):
             self.go_next()      # => HOLD, zonder overgang
             return
         tid = (self.current or {}).get("transition")
@@ -490,6 +516,92 @@ class MpvRenderer:
         self.transition = None
         self.go_next()
 
+    # -- live bediening ---------------------------------------------------------------
+    def _adopt_pending(self):
+        """Een bijgewerkte versie van de playlist direct actief maken (de website toont al
+        de nieuwe versie, dus 'naar item' moet daarin zoeken)."""
+        if self.pending is None:
+            return
+        new, self.pending = self.pending, None
+        cur = self.current or {}
+        base = new.get("items") or []
+        self.cfg = new
+        self.items = self._round(base, True) if self._shuffle(new, False) else list(base)
+        self.index = next((i for i, it in enumerate(self.items)
+                           if it.get("item_id") is not None and it.get("item_id") == cur.get("item_id")), -1)
+        self.fallback_active = False
+        self.played = []
+
+    def _manual_target(self, cmd):
+        """(lijst, index, fallback) voor een opdracht, of een tekst als het niet kan."""
+        cfg = self.cfg or {}
+        base = cfg.get("items") or []
+        if not base:
+            return "er staat niets in de playlist"
+        fb = self.fallback_active
+        action = cmd.get("action")
+        if action == "next":
+            if 0 <= self.index + 1 < len(self.items):
+                return (self.items, self.index + 1, fb)
+            mode = (cfg.get("playlist") or {}).get("repeat_mode", "loop")
+            if mode == "once_then_default" and not fb and cfg.get("fallback_items"):
+                return (self._round(cfg["fallback_items"], self._shuffle(cfg, True)), 0, True)
+            src = (cfg.get("fallback_items") if fb else base) or base
+            return (self._round(src, self._shuffle(cfg, fb)), 0, fb)   # ook bij 'laatste blijft staan'
+        if action == "prev":
+            if not self.items:
+                return "er is geen vorig item"
+            if self.state == "PLAYING_TRANSITION" and 0 <= self.index < len(self.items):
+                return (self.items, self.index, fb)        # het item van vóór de overgang
+            if self._shuffle(cfg, fb):
+                if len(self.played) >= 2:
+                    self.played.pop()                         # huidig item
+                    return self.played[-1]
+                if self.index > 0:
+                    return (self.items, self.index - 1, fb)
+                return "er is nog geen vorig item in deze willekeurige ronde"
+            return (self.items, (self.index - 1) % len(self.items) if self.index >= 0 else len(self.items) - 1, fb)
+        if action == "goto":
+            want = cmd.get("item_id")
+            pos = next((i for i, it in enumerate(base) if it.get("item_id") == want), None)
+            if pos is None:
+                return "dit item staat niet in de playlist op het scherm (bestand ontbreekt of verouderd)"
+            if not fb:
+                for i, it in enumerate(self.items):
+                    if it.get("item_id") == want:
+                        return (self.items, i, False)
+            if self._shuffle(cfg, False):
+                lst = self._round(base, True)
+                j = next(i for i, it in enumerate(lst) if it.get("item_id") == want)
+                lst[0], lst[j] = lst[j], lst[0]
+                return (lst, 0, False)
+            return (list(base), pos, False)
+        return "onbekende opdracht"
+
+    def control(self, cmd):
+        if self.cfg is None or self.state in ("STARTING", "ERROR") or not self.mpv.alive():
+            result = "de player is nog niet klaar"
+        else:
+            self._adopt_pending()
+            target = self._manual_target(cmd)
+            if isinstance(target, str):
+                result = target
+            else:
+                tid = (self.current or {}).get("transition")
+                with_t = (bool(cmd.get("transition")) and self.state == "PLAYING"
+                          and tid in ((self.cfg or {}).get("transitions") or {}))
+                self.forced = target
+                self.consecutive_failures = 0
+                if with_t:
+                    self.item_done()          # eerst de overgang, dan het gekozen item
+                else:
+                    self.transition = None
+                    self.go_next()
+                result = "ok"
+        log.info("Live bediening: %s -> %s", cmd.get("action"), result)
+        self.last_control = {"seq": cmd.get("seq"), "action": cmd.get("action"), "result": result}
+        self.syncer.kick()
+
     def tick(self):
         now = time.time()
         try:
@@ -501,6 +613,13 @@ class MpvRenderer:
             pass
 
         if not self.ensure_mpv():
+            return
+        try:
+            cmd = self.commands.get_nowait()
+        except queue.Empty:
+            cmd = None
+        if cmd is not None:
+            self.control(cmd)
             return
         if self.cfg is not None and self.current is None and self.state not in ("STANDBY", "HOLD", "PLAYING_TRANSITION"):
             self.go_next()

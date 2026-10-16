@@ -5,7 +5,9 @@ De daemon:
 - levert via een lokale webserver (alleen 127.0.0.1) de playerpagina, de gecachte media
   en HTML-projecten. De player werkt daardoor ook als de signage-server even weg is;
 - start Chromium en houdt het in de gaten (proces, levenstekens van de pagina, geheugen);
-- stuurt de status van de pagina door naar de server.
+- stuurt de status van de pagina door naar de server;
+- geeft opdrachten van de live bediening (vorige/volgende/naar item) door aan de pagina
+  via /cmd (long polling, alleen voor de playerpagina op 127.0.0.1).
 
 HTML-projecten worden geleverd vanaf http://localhost:<poort> terwijl de playerpagina op
 http://127.0.0.1:<poort> draait. Dat zijn verschillende origins: een HTML-pagina kan de
@@ -17,13 +19,14 @@ import logging
 import mimetypes
 import os
 import queue
+import secrets
 import shutil
 import signal
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from .. import __version__, htmlpkg
 from .sync import Syncer, display_info, load_cached_config, mem_available, sd_notify
@@ -82,8 +85,8 @@ class PageState:
         return "/m/" + quote(name)
 
     def _item(self, it, idx, system_name):
-        out = {k: it.get(k) for k in ("media_id", "name", "kind", "scale", "duration", "video_duration",
-                                      "transition")}
+        out = {k: it.get(k) for k in ("media_id", "item_id", "name", "kind", "scale", "duration",
+                                      "video_duration", "transition")}
         out["key"] = f"{idx}:{it.get('media_id')}"
         lg = it.get("logo") or {}
         out["logo"] = self._file(lg.get("local")) if lg.get("local") else None
@@ -133,13 +136,46 @@ class PageState:
             return json.dumps(self.data or {"revision": None, "items": []})
 
 
+class CommandBox:
+    """Opdrachten van de live bediening, op te halen door de playerpagina (long polling).
+
+    Elke daemonstart krijgt een nieuw 'boot'-kenmerk: een (her)geladen pagina of een pagina
+    na een herstart van de daemon voert dus nooit oude opdrachten uit."""
+    TTL = 15.0
+
+    def __init__(self):
+        self.cv = threading.Condition()
+        self.boot = secrets.token_hex(4)
+        self.seq = 0
+        self.items = []     # (seq, ontvangen, opdracht)
+
+    def put(self, cmd):
+        with self.cv:
+            self.seq += 1
+            now = time.time()
+            self.items = [x for x in self.items if now - x[1] < self.TTL][-19:]
+            self.items.append((self.seq, now - float(cmd.get("age") or 0), cmd))
+            self.cv.notify_all()
+
+    def get(self, boot, after, wait=20.0):
+        with self.cv:
+            if boot != self.boot or after is None or after > self.seq:
+                return {"boot": self.boot, "seq": self.seq, "commands": []}
+            self.cv.wait_for(lambda: self.seq > after, timeout=wait)
+            now = time.time()
+            cmds = [{"action": c.get("action"), "transition": bool(c.get("transition")), "item_id": c.get("item_id"),
+                     "id": c.get("seq")} for s, t, c in self.items if s > after and now - t < self.TTL]
+            return {"boot": self.boot, "seq": self.seq, "commands": cmds}
+
+
 class LocalServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, port, page_state, on_status):
+    def __init__(self, port, page_state, on_status, commands=None):
         self.page_state = page_state
         self.on_status = on_status
+        self.commands = commands or CommandBox()
         super().__init__(("127.0.0.1", port), Handler)
 
 
@@ -233,6 +269,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send_file(os.path.join(PLAYER_DIR, path[1:]), cache=False)
         if path == "/state":
             return self._send_bytes(200, ps.json().encode(), "application/json")
+        if path == "/cmd":
+            q = parse_qs(urlsplit(self.path).query)
+            try:
+                after = int(q["after"][0]) if "after" in q else None
+            except ValueError:
+                after = None
+            data = self.server.commands.get((q.get("boot") or [""])[0], after)
+            return self._send_bytes(200, json.dumps(data).encode(), "application/json")
         if path.startswith("/m/"):
             with ps.lock:
                 p = ps.files.get(path[3:])
@@ -255,6 +299,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if urlsplit(self.path).path != "/status" or self._host() != "127.0.0.1":
             return self._send_bytes(404, b"", "text/plain")
+        # Een HTML-pagina (origin localhost) kan met een 'simple request' toch naar 127.0.0.1
+        # posten; de browser stuurt dan haar eigen Origin mee. Alleen de playerpagina mag dit.
+        origin = self.headers.get("Origin")
+        if origin and origin != f"http://127.0.0.1:{self.server.server_address[1]}":
+            return self._send_bytes(403, b"", "text/plain")
         try:
             n = min(int(self.headers.get("Content-Length") or 0), 65536)
             data = json.loads(self.rfile.read(n) or b"{}")
@@ -297,7 +346,9 @@ class BrowserRenderer:
         self.next_start_at = 0.0
         self.low_mem_since = None
         self.server = None
-        self.syncer = Syncer(pcfg, self.cache_dir, self.queue, self.status)
+        self.commands = CommandBox()
+        self.last_reported = None
+        self.syncer = Syncer(pcfg, self.cache_dir, self.queue, self.status, on_command=self.commands.put)
 
     # -- status ------------------------------------------------------------------
     def error(self, text):
@@ -307,9 +358,17 @@ class BrowserRenderer:
             self.errors = self.errors[-10:]
 
     def on_page_status(self, data):
+        cur = data.get("current") if isinstance(data.get("current"), dict) else {}
+        last = (data.get("control") or {}).get("last") if isinstance(data.get("control"), dict) else None
+        key = (data.get("phase"), cur.get("item_id"), cur.get("index"), cur.get("transition"),
+               (last or {}).get("seq") if isinstance(last, dict) else None)
         with self.lock:
             self.page_status = data
             self.page_seen = time.time()
+            changed = key != self.last_reported
+            self.last_reported = key
+        if changed:
+            self.syncer.kick()   # website direct laten zien wat er op het scherm staat
 
     def status(self):
         with self.lock:
@@ -333,6 +392,7 @@ class BrowserRenderer:
                 "viewport": ps.get("viewport"), "video_stats": ps.get("video_stats"),
                 "version": __version__, "uptime": time.time() - self.started,
                 "message": self.message or self.syncer.last_error,
+                "control": {"v": 1, "last": (ps.get("control") or {}).get("last") if isinstance(ps.get("control"), dict) else None},
             }
 
     # -- Chromium ----------------------------------------------------------------
@@ -448,7 +508,7 @@ class BrowserRenderer:
                  (cfg.get("playlist") or {}).get("name") or "-", len(cfg.get("items") or []))
 
     def start_server(self):
-        self.server = LocalServer(self.port, self.page_state, self.on_page_status)
+        self.server = LocalServer(self.port, self.page_state, self.on_page_status, self.commands)
         threading.Thread(target=self.server.serve_forever, daemon=True, name="signage-local-http").start()
 
     def tick(self):

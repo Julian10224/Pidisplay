@@ -5,6 +5,9 @@
   SHA-256-controle. HTML-projecten worden veilig uitgepakt (htmlpkg).
 - Schrijft pas daarna de configuratie atomair naar de cache; een onvolledige
   configuratie vervangt nooit de laatst geldige.
+- Haalt in een eigen thread opdrachten voor de live bediening op (long polling) en geeft
+  die door aan de weergave. Na een wissel van item meldt de player zich direct (kick),
+  zodat de website binnen een seconde laat zien wat er op het scherm staat.
 """
 
 import hashlib
@@ -15,11 +18,16 @@ import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .. import htmlpkg
 
 log = logging.getLogger("signage.player")
+
+CONTROL_WAIT = 25      # zelfde als de server
+CONTROL_TTL = 15       # oudere opdrachten worden niet meer uitgevoerd
+KICK_MIN_GAP = 0.3     # minimaal zoveel seconden tussen twee extra statusmeldingen
 
 
 def sd_notify(message):
@@ -105,7 +113,7 @@ def load_cached_config(cache_dir):
 
 
 class Syncer(threading.Thread):
-    def __init__(self, pcfg, cache_dir, out_queue, status_fn):
+    def __init__(self, pcfg, cache_dir, out_queue, status_fn, on_command=None):
         super().__init__(daemon=True, name="signage-sync")
         self.server = pcfg.get("server_url").rstrip("/")
         self.token = pcfg.get("token").strip()
@@ -123,9 +131,17 @@ class Syncer(threading.Thread):
         self.server_ok = None
         self.last_error = None
         self._stop = threading.Event()
+        self._kick = threading.Event()
+        self.on_command = on_command
+        self.control_supported = None
 
     def stop(self):
         self._stop.set()
+        self._kick.set()
+
+    def kick(self):
+        """Status zo snel mogelijk melden (bijv. na een wissel van item)."""
+        self._kick.set()
 
     def _request(self, path, method="GET", data=None, headers=None, timeout=10):
         req = urllib.request.Request(self.server + path, method=method, data=data)
@@ -294,14 +310,60 @@ class Syncer(threading.Thread):
         except (urllib.error.URLError, OSError):
             pass
 
-    def run(self):
-        last_hb = 0
-        while not self._stop.is_set():
+    # -- live bediening ---------------------------------------------------------
+    def control_once(self, epoch, seq, wait=CONTROL_WAIT):
+        """Eén ophaalronde. Geeft (epoch, seq, pauze) terug."""
+        q = {"epoch": epoch or "", "wait": str(wait if seq is not None else 0)}
+        if seq is not None:
+            q["after"] = str(seq)
+        try:
+            with self._request("/api/player/v1/control?" + urllib.parse.urlencode(q),
+                               timeout=CONTROL_WAIT + 10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:      # oudere server zonder live bediening
+                self.control_supported = False
+                return epoch, seq, 60
+            return epoch, seq, 5
+        except (urllib.error.URLError, OSError, ValueError):
+            return epoch, seq, 5
+        self.control_supported = True
+        new_epoch, new_seq = data.get("epoch"), int(data.get("seq") or 0)
+        if new_epoch != epoch or seq is None:
+            return new_epoch, new_seq, 0     # eerste contact of server herstart: niets uitvoeren
+        for c in data.get("commands") or []:
             try:
-                self.fetch_once()
+                if int(c.get("seq")) > seq and float(c.get("age") or 0) < CONTROL_TTL:
+                    self.on_command(c)
             except Exception as exc:  # noqa: BLE001
-                log.exception("Synchronisatie mislukt: %s", exc)
-            if time.time() - last_hb >= self.hb_interval:
+                log.warning("Opdracht kon niet worden uitgevoerd: %s", exc)
+        return epoch, new_seq, float(data.get("retry") or 0)
+
+    def control_loop(self):
+        epoch, seq = None, None
+        while not self._stop.is_set():
+            epoch, seq, pause = self.control_once(epoch, seq)
+            if pause:
+                self._stop.wait(pause)
+
+    def run(self):
+        if self.on_command is not None:
+            threading.Thread(target=self.control_loop, daemon=True, name="signage-control").start()
+        last_hb = last_fetch = last_kick = 0.0
+        while not self._stop.is_set():
+            now = time.time()
+            if now - last_fetch >= self.poll:
+                last_fetch = now
+                try:
+                    self.fetch_once()
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("Synchronisatie mislukt: %s", exc)
+            kicked = self._kick.is_set()
+            if kicked and time.time() - last_kick < KICK_MIN_GAP:
+                self._stop.wait(KICK_MIN_GAP)
+            if kicked or time.time() - last_hb >= self.hb_interval:
+                self._kick.clear()
                 self.heartbeat()
-                last_hb = time.time()
-            self._stop.wait(self.poll)
+                last_hb = last_kick = time.time()
+            now = time.time()
+            self._kick.wait(max(0.05, min(last_fetch + self.poll, last_hb + self.hb_interval) - now))

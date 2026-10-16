@@ -66,8 +66,9 @@ class Rig:
         self.page = None
 
     # -- scenario -------------------------------------------------------------
-    def item(self, kind, name, scale="cover", duration=1, transition=None, design=None, logo=False):
+    def item(self, kind, name, scale="cover", duration=1, transition=None, design=None, logo=False, item_id=None):
         it = {"media_id": name.replace("/", "_").replace(".", "_"), "name": name, "kind": kind, "scale": scale,
+              "item_id": item_id,
               "duration": None if kind == "video" else duration, "transition": transition,
               "logo": {"media_id": "logo", "local": os.path.join(self.media, "logo.png")} if logo else None}
         if kind == "html":
@@ -100,7 +101,7 @@ class Rig:
     # -- uitvoeren --------------------------------------------------------------
     def start(self):
         self.proc = subprocess.Popen([sys.executable, os.path.join(HERE, "browser", "harness.py"), str(self.port),
-                                      self.scenario], stdout=subprocess.PIPE, text=True)
+                                      self.scenario], stdout=subprocess.PIPE, stdin=subprocess.PIPE, text=True)
         assert self.proc.stdout.readline().strip() == "READY"
         self.page = self.browser.new_page(viewport={"width": W, "height": H})
         self.page.goto(f"http://127.0.0.1:{self.port}/?test=1")
@@ -112,6 +113,13 @@ class Rig:
         if self.proc:
             self.proc.kill()
             self.proc.wait()
+
+    def cmd(self, action, **kw):
+        """Opdracht van de live bediening, zoals de Syncer die van de server doorgeeft."""
+        self.seq = getattr(self, "seq", 0) + 1
+        self.proc.stdin.write(json.dumps({"action": action, "seq": self.seq, "age": 0, **kw}) + "\n")
+        self.proc.stdin.flush()
+        return self.seq
 
     def js(self, expr):
         return self.page.evaluate(expr)
@@ -454,3 +462,231 @@ def test_missing_logo_does_not_block_item(rig):
     rig.write([it, rig.item("image", "portrait.png", duration=1)])
     rig.start()
     rig.wait_playing("small.png", timeout=15, count=2)
+
+
+# -- 1.3: live bediening ---------------------------------------------------------------------
+
+LIVE = ["portrait.png", "small.png", "landscape.jpg", "standby.png"]
+
+
+def _live_items(rig, duration=30, transition=None):
+    return [rig.item("image", n, duration=duration, transition=transition, item_id=100 + i) for i, n in enumerate(LIVE)]
+
+
+def _wait_current(rig, name, timeout=5):
+    end = time.time() + timeout
+    while time.time() < end:
+        if rig.js("window.__signage.state()") == "PLAYING" and _names(rig)[-1:] == [name]:
+            return True
+        time.sleep(0.05)
+    raise AssertionError(f"'{name}' niet op het scherm; historie: {rig.history()[-8:]}")
+
+
+def test_live_next_prev_goto(rig):
+    rig.write(_live_items(rig))
+    rig.start()
+    rig.wait_playing(LIVE[0])
+    time.sleep(0.5)
+    t0 = time.time()
+    rig.cmd("next")
+    _wait_current(rig, LIVE[1])
+    delay = time.time() - t0
+    for action, kw, want in [("next", {}, LIVE[2]), ("prev", {}, LIVE[1]), ("goto", {"item_id": 103}, LIVE[3]),
+                             ("next", {}, LIVE[0]), ("prev", {}, LIVE[3])]:
+        rig.cmd(action, **kw)
+        _wait_current(rig, want)
+    snap = rig.js("window.__signage.snapshot()")
+    assert snap["current"]["item_id"] == 103 and snap["control"]["last"]["result"] == "ok"
+    assert snap["control"]["last"]["seq"] == rig.seq
+    assert _names(rig) == [LIVE[0], LIVE[1], LIVE[2], LIVE[1], LIVE[3], LIVE[0], LIVE[3]]
+    assert rig.probe()["blank"] == 0, "zwart beeld tijdens doorklikken"
+    assert delay < 1.5, delay
+    # onbekend item: niets verandert, wel een uitslag
+    rig.cmd("goto", item_id=999)
+    time.sleep(0.8)
+    snap = rig.js("window.__signage.snapshot()")
+    assert snap["control"]["last"]["result"] != "ok" and snap["current"]["item_id"] == 103
+
+
+def test_live_rapid_clicking_ends_on_right_item(rig):
+    rig.write(_live_items(rig))
+    rig.start()
+    rig.wait_playing(LIVE[0])
+    for _ in range(7):          # sneller klikken dan items kunnen laden
+        rig.cmd("next")
+        time.sleep(0.03)
+    time.sleep(1.5)
+    assert _names(rig)[-1] == LIVE[7 % len(LIVE)]
+    assert rig.js("window.__signage.state()") == "PLAYING"
+    assert rig.js("document.querySelectorAll('.slot').length") <= 3, "lagen blijven achter"
+    assert rig.probe()["blank"] == 0
+
+
+def test_live_with_transition_and_during_transition(rig):
+    rig.write(_live_items(rig, transition="T"), transitions=rig.transition())
+    rig.start()
+    rig.wait_playing(LIVE[0])
+    rig.cmd("next", transition=True)
+    _wait_current(rig, LIVE[1], timeout=8)
+    states = [h["state"] for h in rig.history() if h["state"] in ("PLAYING", "PLAYING_TRANSITION")]
+    assert states == ["PLAYING", "PLAYING_TRANSITION", "PLAYING"], states
+    rig.cmd("next")                                   # zonder overgang: direct
+    _wait_current(rig, LIVE[2])
+    states = [h["state"] for h in rig.history() if h["state"] in ("PLAYING", "PLAYING_TRANSITION")]
+    assert states[-2:] == ["PLAYING", "PLAYING"], states
+    # tijdens een overgang: de overgang stopt en het volgende item verschijnt
+    rig.cmd("next", transition=True)
+    end = time.time() + 5
+    while rig.js("window.__signage.state()") != "PLAYING_TRANSITION" and time.time() < end:
+        time.sleep(0.02)
+    rig.cmd("next")
+    _wait_current(rig, LIVE[3])
+    time.sleep(0.3)
+    on = rig.js("Array.from(document.querySelectorAll('.slot.on video')).length")
+    assert on == 0, "overgangsvideo bleef zichtbaar"
+    assert rig.probe()["blank"] == 0
+
+
+def test_live_shuffle_prev_and_hold(rig):
+    rig.write(_live_items(rig), shuffle=True)
+    rig.start()
+    end = time.time() + 15
+    while not _names(rig) and time.time() < end:
+        time.sleep(0.1)
+    for i in range(3):
+        rig.cmd("next")
+        end = time.time() + 5
+        while len(_names(rig)) < i + 2 and time.time() < end:
+            time.sleep(0.05)
+    seen = _names(rig)
+    assert len(seen) == 4 and len(set(seen)) == 4, seen
+    rig.cmd("prev")
+    _wait_current(rig, seen[-2])
+    rig.cmd("prev")
+    _wait_current(rig, seen[-3])
+
+
+def test_live_hold_next_restarts(rig):
+    rig.write(_live_items(rig, duration=0.3)[:2], repeat="once_hold_last")
+    rig.start()
+    end = time.time() + 10
+    while rig.js("window.__signage.state()") != "HOLD" and time.time() < end:
+        time.sleep(0.1)
+    rig.cmd("next")
+    _wait_current(rig, LIVE[0])
+
+
+def test_live_old_commands_not_replayed(rig):
+    rig.write(_live_items(rig))
+    rig.start()
+    rig.wait_playing(LIVE[0])
+    rig.cmd("next")
+    _wait_current(rig, LIVE[1])
+    # pagina opnieuw laden (bijv. Chromium herstart): de oude opdracht wordt niet nog eens uitgevoerd
+    rig.page.reload()
+    rig.wait_playing(LIVE[0])
+    time.sleep(1.5)
+    assert _names(rig) == [LIVE[0]]
+    rig.cmd("next")
+    _wait_current(rig, LIVE[1])
+
+
+def test_page_status_reaches_daemon_after_command(rig):
+    """De playerpagina meldt haar status (met Origin-header) aan de daemon, direct na een opdracht."""
+    rig.write(_live_items(rig))
+    rig.start()
+    rig.wait_playing(LIVE[0])
+    seq = rig.cmd("goto", item_id=102)
+    _wait_current(rig, LIVE[2])
+    end = time.time() + 2
+    st = {}
+    while time.time() < end:
+        try:
+            st = json.load(open(rig.scenario + ".status"))
+        except (OSError, ValueError):
+            st = {}
+        if (((st.get("control") or {}).get("last") or {}).get("seq") == seq
+                and (st.get("current") or {}).get("item_id") == 102):
+            break
+        time.sleep(0.05)
+    assert st["control"]["last"] == {"seq": seq, "action": "goto", "result": "ok"}, st.get("control")
+    assert st["current"]["item_id"] == 102 and st["phase"] == "PLAYING"
+
+
+def test_live_control_end_to_end_browser_renderer(tmp_path, browser):
+    """Website -> server -> Syncer -> BrowserRenderer (daemon) -> playerpagina -> status terug."""
+    import threading
+
+    from conftest import login, make_config, upload
+    from waitress import create_server
+
+    from signage.app import create_app
+    from signage.config import Config, read_player_config
+    from signage.player.browser import BrowserRenderer
+
+    port, local_port = free_port(), free_port()
+    ini, player_ini = make_config(tmp_path, port=port)
+    with open(player_ini, "a") as fh:
+        fh.write(f"local_port = {local_port}\n")
+    cfg = Config(ini)
+    app = create_app(cfg, start_background=False)
+    srv = create_server(app, host="127.0.0.1", port=port, threads=6)
+    threading.Thread(target=srv.run, daemon=True).start()
+    c = app.test_client()
+    h = c.h = login(c, cfg)
+    ids = []
+    for i, col in enumerate([(200, 30, 30), (30, 180, 60), (30, 60, 220)]):
+        p = tmp_path / f"k{i}.png"
+        Image.new("RGB", (640, 360), col).save(p)
+        ids.append(upload(c, str(p)).json["media"]["id"])
+    pid = c.post("/api/playlists", json={"name": "B"}, headers=h).json["id"]
+    items = c.put(f"/api/playlists/{pid}", json={"items": [{"media_id": m, "duration": 60} for m in ids]},
+                  headers=h).json["playlist"]["items"]
+    c.post(f"/api/playlists/{pid}/activate", json={}, headers=h)
+
+    r = BrowserRenderer(read_player_config(player_ini), launch_browser=False)
+    t = threading.Thread(target=r.run, daemon=True)
+    import signal as _signal
+    orig = _signal.signal
+    _signal.signal = lambda *a: None      # run() installeert signaalhandlers; niet in een thread
+    try:
+        t.start()
+        time.sleep(0.3)
+    finally:
+        _signal.signal = orig
+    page = browser.new_page(viewport={"width": W, "height": H})
+
+    def local():
+        return c.get("/api/status").json["players"][0]
+
+    def cur():
+        return ((local().get("status") or {}).get("current") or {}).get("item_id")
+
+    def wait(cond, timeout):
+        end = time.time() + timeout
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+
+    try:
+        assert wait(lambda: r.cfg is not None, 15)
+        page.goto(f"http://127.0.0.1:{local_port}/?test=1")
+        assert wait(lambda: cur() == items[0]["item_id"], 20), local().get("status")
+        time.sleep(1.0)
+        timings = []
+        for body, want in [({"action": "next"}, 1), ({"action": "goto", "item_id": items[0]["item_id"]}, 0),
+                           ({"action": "prev"}, 2)]:
+            t0 = time.time()
+            assert c.post("/api/players/local/control", json=body, headers=h).status_code == 200
+            assert wait(lambda: cur() == items[want]["item_id"], 5), (body, local()["status"])
+            timings.append(time.time() - t0)
+        assert local()["status"]["control"]["last"]["result"] == "ok"
+        assert page.evaluate("window.__signage.probe").get("blank") == 0
+        assert max(timings) < 2.0, timings
+    finally:
+        r.running = False
+        page.close()
+        t.join(5)
+        srv.close()

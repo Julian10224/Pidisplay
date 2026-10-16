@@ -25,6 +25,10 @@
  *   hetzelfde item kiezen.
  * - Een logo hoort bij het item: het zit in dezelfde laag en verschijnt en verdwijnt dus
  *   tegelijk met het item. Overgangen en het standby-scherm hebben geen logo.
+ * - Live bediening (website): 'volgende', 'vorige' en 'naar item' starten een nieuwe
+ *   generatie en laten het gekozen item via de normale weg verschijnen (voorladen, pas
+ *   wisselen als het klaar is, eventueel eerst de overgang). Daarna loopt de playlist
+ *   gewoon verder vanaf dat item. Opdrachten komen via /cmd van de player-daemon.
  */
 'use strict';
 
@@ -59,6 +63,8 @@ let timers = [];
 let z = 1;
 let lastRevision = null;
 let roundCache = null;    // volgende geschudde ronde: { base, src, list }
+let played = [];          // afgespeelde posities { list, idx, fb } (voor 'vorige' bij willekeurig)
+let lastControl = null;   // laatst uitgevoerde opdracht van de live bediening
 const errors = [];
 const history = [];
 const slotsByEl = new WeakMap();
@@ -76,6 +82,7 @@ function setState(s, name) {
   state = s;
   history.push({ t: performance.now(), state: s, name: name || null });
   if (history.length > 500) history.shift();
+  if (s === S.PLAYING || s === S.PLAYING_TRANSITION || s === S.HOLD || s === S.STANDBY) reportSoon();
 }
 function clearTimers() { timers.forEach(clearTimeout); timers = []; }
 function later(ms, fn) { const t = setTimeout(fn, ms); timers.push(t); return t; }
@@ -309,7 +316,7 @@ function peekNext() {
 }
 
 function commit(p) {
-  if (p.conf !== cfg) { cfg = p.conf; applyRotation(); }
+  if (p.conf !== cfg) { cfg = p.conf; applyRotation(); played = []; }
   if (pending && p.conf === pending) pending = null;
   if (roundCache && p.list === roundCache.list) roundCache = null;   // ronde is begonnen
   items = p.list;
@@ -317,8 +324,8 @@ function commit(p) {
   fallbackActive = p.fb;
 }
 
-function schedulePreload(opts) {
-  const p = peekNext();
+function schedulePreload(opts, target) {
+  const p = target || peekNext();
   if (p.type !== 'item') return;
   const item = p.list[p.idx];
   const lead = HTML_READY_MAX + 1000;
@@ -345,11 +352,12 @@ function cancelPreload() {
 // ---------------------------------------------------------------------------
 // Toestandsovergangen
 // ---------------------------------------------------------------------------
-async function advance(g) {
+async function advance(g, forced) {
   setState(S.LOADING_NEXT);
   for (let attempt = 0; attempt < 1000; attempt++) {
     if (g !== gen) return;
-    const p = peekNext();
+    const p = forced || peekNext();   // 'forced': gekozen via de live bediening
+    forced = null;
     if (p.type === 'standby') { showStandby(g, 'lege of geen playlist'); return; }
     if (p.type === 'hold') { setState(S.HOLD, current && current.item.name); return; }
     commit(p);
@@ -403,6 +411,9 @@ async function startNext(g, item, slot) {
   if (activeTransition) { rearmTransition(activeTransition); activeTransition = null; }
   hideFallback();
   clearTimers();
+  const top = played[played.length - 1];
+  if (!top || top.list !== items || top.idx !== index) { played.push({ list: items, idx: index, fb: fallbackActive }); }
+  if (played.length > 50) played.shift();
   setState(S.PLAYING, item.name);
   if (slot.kind === 'video') {
     if (endedEarly || slot.media.ended) { later(0, () => itemDone(g)); }
@@ -424,23 +435,23 @@ function currentRemaining(item) {
   return secs * 1000 - 300;
 }
 
-async function itemDone(g) {
+async function itemDone(g, forced) {
   if (g !== gen || state !== S.PLAYING) return;     // alleen vanuit PLAYING: geen dubbele afhandeling
   failures = 0;
   clearTimers();
-  const p = peekNext();
+  const p = forced || peekNext();
   if (p.type === 'hold') { setState(S.HOLD, current.item.name); return; }
   const tid = current.item.transition;
   const t = tid ? tslots[tid] : null;
-  if (!t) { advance(g); return; }
+  if (!t) { advance(g, forced); return; }
   setState(S.PREPARE_TRANSITION, t.name);
-  schedulePreload();
+  schedulePreload(null, forced);
   try {
     await timeout(t.ready, TRANSITION_READY_TIMEOUT, 'overgang');
   } catch (e) {
     if (g !== gen) return;
     log(`Overgang '${t.name || tid}' overgeslagen: ${e.message}`);
-    advance(g);
+    advance(g, forced);
     return;
   }
   if (g !== gen) return;
@@ -453,7 +464,7 @@ async function itemDone(g) {
     if (g !== gen) return;
     rearmTransition(t);
     log(`Overgang '${t.name || tid}' start niet: ${e.message}`);
-    advance(g);
+    advance(g, forced);
     return;
   }
   if (g !== gen) { rearmTransition(t); return; }
@@ -475,7 +486,7 @@ async function itemDone(g) {
   if (g !== gen || state !== S.PLAYING_TRANSITION) return;
   if (how !== 'ok') log(`Overgang '${t.name || tid}' afgebroken (${how}).`);
   // De overgang blijft op het laatste frame staan tot het volgende item zichtbaar is.
-  advance(g);
+  advance(g, forced);
 }
 
 function showStandby(g, reason) {
@@ -529,6 +540,7 @@ function restart(conf) {
   cfg = conf;
   pending = null;
   roundCache = null;
+  played = [];
   items = isShuffle(conf, false) ? shuffled(conf.items || [], current && current.item ? current.item.media_id : null)
     : (conf.items || []).slice();
   fallbackActive = false;
@@ -558,6 +570,111 @@ function onConfig(conf) {
 }
 
 // ---------------------------------------------------------------------------
+// Live bediening
+// ---------------------------------------------------------------------------
+/* Een bijgewerkte versie van dezelfde playlist meteen actief maken: de website toont al de
+   nieuwe versie, dus 'naar item' moet daarin zoeken. */
+function adoptPending() {
+  if (!pending) return;
+  const conf = pending;
+  pending = null;
+  const cur = current && !current.standby ? current.item : null;
+  cfg = conf;
+  roundCache = null;
+  applyRotation();
+  const base = conf.items || [];
+  items = isShuffle(conf, false) ? shuffled(base, cur ? cur.media_id : null) : base.slice();
+  index = cur ? items.findIndex((it) => it.item_id != null && it.item_id === cur.item_id) : -1;
+  fallbackActive = false;
+  played = [];
+}
+
+/* Doel van een opdracht als { list, idx, fb }, of een tekst als het niet kan. */
+function manualTarget(cmd) {
+  const base = (cfg && cfg.items) || [];
+  if (!base.length) return 'er staat niets in de playlist';
+  const fb = fallbackActive;
+  const curId = current && current.item ? current.item.media_id : null;
+  if (cmd.action === 'next') {
+    if (index + 1 >= 0 && index + 1 < items.length) return { list: items, idx: index + 1, fb };
+    const mode = (cfg.playlist || {}).repeat_mode || 'loop';
+    if (mode === 'once_then_default' && !fb && (cfg.fallback_items || []).length) {
+      const f = cfg.fallback_items;
+      return { list: isShuffle(cfg, true) ? shuffled(f, curId) : f.slice(), idx: 0, fb: true };
+    }
+    const src = (fb ? cfg.fallback_items : base) || base;    // ook bij 'laatste blijft staan'
+    return { list: isShuffle(cfg, fb) ? shuffled(src, curId) : src.slice(), idx: 0, fb };
+  }
+  if (cmd.action === 'prev') {
+    if (!items.length) return 'er is geen vorig item';
+    if (state === S.PLAYING_TRANSITION && index >= 0 && index < items.length) return { list: items, idx: index, fb };
+    if (isShuffle(cfg, fb)) {
+      if (played.length >= 2) { played.pop(); return played[played.length - 1]; }
+      if (index > 0) return { list: items, idx: index - 1, fb };
+      return 'er is nog geen vorig item in deze willekeurige ronde';
+    }
+    return { list: items, idx: index >= 0 ? (index - 1 + items.length) % items.length : items.length - 1, fb };
+  }
+  if (cmd.action === 'goto') {
+    const pos = base.findIndex((it) => it.item_id === cmd.item_id);
+    if (pos < 0) return 'dit item staat niet in de playlist op het scherm (bestand ontbreekt of verouderd)';
+    if (!fb) {
+      const i = items.findIndex((it) => it.item_id === cmd.item_id);
+      if (i >= 0) return { list: items, idx: i, fb: false };
+    }
+    if (isShuffle(cfg, false)) {
+      const lst = shuffled(base, null);
+      const j = lst.findIndex((it) => it.item_id === cmd.item_id);
+      [lst[0], lst[j]] = [lst[j], lst[0]];
+      return { list: lst, idx: 0, fb: false };
+    }
+    return { list: base.slice(), idx: pos, fb: false };
+  }
+  return 'onbekende opdracht';
+}
+
+function control(cmd) {
+  if (!cfg || state === S.IDLE) return 'de player is nog niet klaar';
+  adoptPending();
+  const t = manualTarget(cmd);
+  if (typeof t === 'string') return t;
+  const target = { type: 'item', conf: cfg, list: t.list, idx: t.idx, fb: t.fb };
+  const tid = current && !current.standby ? current.item.transition : null;
+  const withTransition = !!cmd.transition && state === S.PLAYING && !!tid && !!tslots[tid];
+  const g = ++gen;
+  clearTimers();
+  failures = 0;
+  if (withTransition) itemDone(g, target); else advance(g, target);
+  return 'ok';
+}
+
+function handleCommand(c) {
+  let result;
+  try { result = control(c); } catch (e) { result = 'fout: ' + e.message; }
+  if (result !== 'ok') log(`Opdracht '${c.action}' niet uitgevoerd: ${result}`);
+  lastControl = { seq: c.id, action: c.action, result };
+  reportSoon();
+}
+
+let cmdBoot = '', cmdSeq = null;
+async function commandLoop() {
+  for (;;) {
+    try {
+      const q = cmdSeq == null ? '' : `?boot=${encodeURIComponent(cmdBoot)}&after=${cmdSeq}`;
+      const r = await fetch('/cmd' + q, { cache: 'no-store' });
+      if (r.ok) {
+        const d = await r.json();
+        if (cmdSeq != null && d.boot === cmdBoot) (d.commands || []).forEach(handleCommand);
+        cmdBoot = d.boot;
+        cmdSeq = d.seq;
+        continue;
+      }
+    } catch (e) { /* daemon even niet bereikbaar */ }
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Communicatie met de player-daemon
 // ---------------------------------------------------------------------------
 async function poll() {
@@ -581,7 +698,9 @@ function snapshot() {
       media_id: state === S.PLAYING_TRANSITION ? null : cur.media_id,
       name: state === S.PLAYING_TRANSITION ? 'Overgang: ' + (activeTransition && activeTransition.name || '') : cur.name,
       kind: cur.kind, index, total: items.length, transition: state === S.PLAYING_TRANSITION,
+      item_id: cur.item_id == null ? null : cur.item_id,
     } : null,
+    control: { v: 1, last: lastControl },
     errors: errors.slice(),
     viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio,
       screen_w: Math.round(screen.width * window.devicePixelRatio), screen_h: Math.round(screen.height * window.devicePixelRatio) },
@@ -590,11 +709,20 @@ function snapshot() {
   };
 }
 
-async function reportStatus() {
+async function postStatus() {
   try {
     await fetch('/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(snapshot()) });
   } catch (e) { /* genegeerd */ }
+}
+async function reportStatus() {
+  await postStatus();
   setTimeout(reportStatus, STATUS_MS);
+}
+/* Na een wissel van item direct melden (de daemon geeft het meteen door aan de server). */
+let soonTimer = null;
+function reportSoon() {
+  if (soonTimer) return;
+  soonTimer = setTimeout(() => { soonTimer = null; postStatus(); }, 50);
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +730,7 @@ async function reportStatus() {
 // ---------------------------------------------------------------------------
 if (TEST) {
   const probe = { frames: 0, blank: 0, blankAt: [], started: false };
-  window.__signage = { probe, history, errors, state: () => state, snapshot, gen: () => gen };
+  window.__signage = { probe, history, errors, state: () => state, snapshot, gen: () => gen, control };
   const check = () => {
     const visible = Array.from(stage.querySelectorAll('.slot.on')).some((el) => {
       const s = slotsByEl.get(el);
@@ -629,3 +757,4 @@ if (TEST) {
 
 poll();
 reportStatus();
+commandLoop();

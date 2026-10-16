@@ -1,6 +1,6 @@
 # Controle van de code tegen beide opdrachten
 
-Versie 1.2.0. Per eis: waar het in de code zit en hoe het is gecontroleerd.
+Versie 1.3.0. Per eis: waar het in de code zit en hoe het is gecontroleerd.
 
 **Legenda**
 
@@ -143,6 +143,14 @@ staat als 🟡 en is opgenomen in de checklist in README §17.
 | Schakelaar voor willekeurige volgorde per playlist | ✅ | editor + `playlists.shuffle`; browser- en mpv-tests: elk item één keer per ronde, geschud, nooit twee keer achter elkaar; geïnstalleerd systeem 10/10 |
 | Per item een PNG-logo linksboven | ✅ / 🟡 | `playlist_items.logo_media_id`; pixelmetingen in Chromium (positie, 18%, transparantie, niet tijdens overgang) en met de echte mpv (ook 90° gedraaid); niet op het fysieke scherm bekeken |
 | Pagina met alles wat op de Pi geüpload is, met verwijderen | ✅ | *Media* uitgebreid tot overzicht (opslag, gebruik, filters, meerdere tegelijk verwijderen); API- en browsertests |
+
+---
+
+## Aanvullende wens (1.3.0)
+
+| Wens | Status | Waar / hoe gecontroleerd |
+|---|---|---|
+| Knop in de website om de live playlist door te klikken en alles in een paar seconden te testen | ✅ / 🟡 | *Vorige*/*Volgende* op dashboard en *Schermen*, klikbare filmstrip, ← →, optioneel met overgang; `test_v13.py`, 8 browsertests (ook de hele keten met de browserweergave) (0 frames zwart bij doorklikken), geïnstalleerd systeem met echte mpv 10/10 (0,2–0,4 s); niet op het fysieke scherm bekeken |
 
 ---
 

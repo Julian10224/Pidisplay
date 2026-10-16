@@ -134,6 +134,8 @@ const P = {
   eye: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z',
   download: 'M12 4v12 M7 11l5 5 5-5 M4 20h16',
   play: 'M7 4l13 8-13 8z',
+  skipNext: 'M5 5l10 7-10 7z M18 5v14',
+  skipPrev: 'M19 5L9 12l10 7z M6 5v14',
   image: 'M4 5h16v14H4z M4 15l4-4 4 4 3-3 5 5',
   video: 'M3 6h13v12H3z M16 10l5-3v10l-5-3',
   grip: 'M9 6h.01 M15 6h.01 M9 12h.01 M15 12h.01 M9 18h.01 M15 18h.01',
@@ -327,6 +329,61 @@ function rendererText(st) {
   return parts.join(' · ');
 }
 
+// ---------------------------------------------------------------------------
+// Live bediening: het echte scherm vanuit de website door de playlist laten klikken.
+// ---------------------------------------------------------------------------
+const LIVE_T_KEY = 'signage.liveTransition';
+function useLiveControl(reload) {
+  const alive = useRef(true);
+  const burstId = useRef(0);
+  const [sent, setSent] = useState(null);     // { player, seq } van de laatste opdracht
+  const [withT, setWithTState] = useState(() => { try { return localStorage.getItem(LIVE_T_KEY) === '1'; } catch (e) { return false; } });
+  useEffect(() => () => { alive.current = false; }, []);
+  const setWithT = (v) => { setWithTState(v); try { localStorage.setItem(LIVE_T_KEY, v ? '1' : '0'); } catch (e) { /* genegeerd */ } };
+  // Na een opdracht de status even elke 0,5 s verversen, zodat je direct ziet wat er speelt.
+  const burst = () => {
+    const id = ++burstId.current;
+    let n = 0;
+    const step = async () => {
+      if (!alive.current || id !== burstId.current || n++ >= 24) return;
+      try { await reload(); } catch (e) { /* stil */ }
+      setTimeout(step, 500);
+    };
+    setTimeout(step, 300);
+  };
+  const send = async (player, action, extra = {}) => {
+    if (!player) return;
+    try {
+      const r = await api('POST', `/api/players/${player.id}/control`, { action, transition: withT, ...extra });
+      if (alive.current) setSent({ player: player.id, seq: String(r.seq) });
+      burst();
+    } catch (e) { fail(e); }
+  };
+  return { send, sent, withT, setWithT };
+}
+
+function canControl(p) {
+  return !!(p && p.online && p.status && p.status.control);
+}
+
+function LiveControls({ player, ctl, hint }) {
+  if (!player || !player.online) return null;
+  const s = player.status || {};
+  if (!s.control) return html`<p class="muted small">Live bediening werkt zodra deze player versie 1.3 of nieuwer draait.</p>`;
+  const last = s.control.last;
+  const failed = ctl.sent && ctl.sent.player === player.id && last && String(last.seq) === ctl.sent.seq && last.result !== 'ok'
+    ? last.result : null;
+  return html`<div class="live-ctl" role="group" aria-label=${'Live bediening van ' + player.name}>
+    <div class="row">
+      <button class="btn" onClick=${() => ctl.send(player, 'prev')} title="Vorige item nu op het scherm tonen"><${Icon} name="skipPrev" />Vorige</button>
+      <button class="btn primary" onClick=${() => ctl.send(player, 'next')} title="Volgende item nu op het scherm tonen">Volgende<${Icon} name="skipNext" /></button>
+      <label class="check small"><input type="checkbox" checked=${ctl.withT} onChange=${(e) => ctl.setWithT(e.target.checked)} />Met overgang</label>
+    </div>
+    ${failed ? html`<p class="small live-fail" role="status">Niet uitgevoerd: ${failed}.</p>`
+      : hint && html`<p class="muted small">${hint}</p>`}
+  </div>`;
+}
+
 function Dashboard() {
   const [st, setSt] = useState(null);
   const [playlists, setPlaylists] = useState([]);
@@ -336,6 +393,7 @@ function Dashboard() {
   const loadPlaylists = async () => setPlaylists((await api('GET', '/api/playlists')).playlists);
   usePoll(loadStatus, 4000);
   useEffect(() => { loadPlaylists().catch(fail); }, []);
+  const ctl = useLiveControl(loadStatus);
 
   const local = st && st.players.find((p) => p.kind === 'local');
   const eff = local && local.effective_playlist;
@@ -346,9 +404,25 @@ function Dashboard() {
     api('GET', `/api/playlists/${eff.id}`).then((r) => setStrip(r.playlist)).catch(() => setStrip(null));
   }, [effKey, revision]);
 
+  // Pijltjestoetsen: vorige/volgende op het scherm (niet in invoervelden of keuzelijsten).
+  const liveRef = useRef(null);
+  liveRef.current = canControl(local) ? local : null;
+  useEffect(() => {
+    const key = (e) => {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !liveRef.current) return;
+      if (document.querySelector('.modal-backdrop')) return;
+      if (e.target.closest && e.target.closest('input, select, textarea, [contenteditable]')) return;
+      if (e.key === 'ArrowRight') { e.preventDefault(); ctl.send(liveRef.current, 'next'); }
+      if (e.key === 'ArrowLeft') { e.preventDefault(); ctl.send(liveRef.current, 'prev'); }
+    };
+    addEventListener('keydown', key);
+    return () => removeEventListener('keydown', key);
+  });
+
   if (!st) return html`<p class="muted">Status laden…</p>`;
 
   const status = (local && local.status) || {};
+  const live = canControl(local);
   const cur = local && local.online && status.state === 'playing' ? status.current : null;
   const standby = local && local.online && status.state === 'standby';
   const disk = st.disk;
@@ -392,8 +466,15 @@ function Dashboard() {
           ${cur && html`<span>${strip && strip.shuffle ? 'willekeurig · ' : ''}${cur.index + 1} / ${cur.total}</span>`}
         </div>
         ${strip && strip.items.length > 0 && html`<div class="filmstrip" aria-label="Volgorde in de playlist">
-          ${strip.items.map((it, i) => html`<div class=${'frame' + (cur && cur.media_id === it.media.id && (strip.shuffle || cur.index === i) ? ' now' : '')} key=${it.item_id} title=${it.media.name}>
-            <${Thumb} media=${it.media} /></div>`)}</div>`}
+          ${strip.items.map((it, i) => {
+            const now = cur && !cur.transition && (cur.item_id != null ? cur.item_id === it.item_id
+              : cur.media_id === it.media.id && (strip.shuffle || cur.index === i));
+            return live
+              ? html`<button type="button" class=${'frame' + (now ? ' now' : '')} key=${it.item_id} aria-current=${now ? 'true' : undefined}
+                  title=${`${i + 1}. ${it.media.name} — nu op het scherm tonen`} aria-label=${`${i + 1}. ${it.media.name} nu op het scherm tonen`}
+                  onClick=${() => ctl.send(local, 'goto', { item_id: it.item_id })}><${Thumb} media=${it.media} /></button>`
+              : html`<div class=${'frame' + (now ? ' now' : '')} key=${it.item_id} title=${it.media.name}><${Thumb} media=${it.media} /></div>`;
+          })}</div>`}
       </div>
 
       <div class="panel now-panel">
@@ -401,6 +482,8 @@ function Dashboard() {
           <div class="muted small">Nu afgespeeld</div>
           <div class="now-title">${cur ? cur.name : '—'}</div>
         </div>
+        <${LiveControls} player=${local} ctl=${ctl}
+          hint=${strip && strip.items.length ? 'Klik op een beeldje om dat item meteen te tonen. ← en → werken ook.' : null} />
         <dl class="facts">
           <dt>Playlist</dt><dd>${eff ? eff.name : 'geen'}</dd>
           <dt>Player</dt><dd>${local && local.online
@@ -1149,6 +1232,7 @@ function PlayersPage() {
   const [renaming, setRenaming] = useState(null);
   const load = async () => setPlayers((await api('GET', '/api/players')).players);
   usePoll(load, 5000);
+  const ctl = useLiveControl(load);
   useEffect(() => {
     api('GET', '/api/playlists').then((r) => setPlaylists(r.playlists)).catch(fail);
     api('GET', '/api/system/info').then(setInfo).catch(() => {});
@@ -1204,6 +1288,7 @@ function PlayersPage() {
             ${s.renderer && html`<dt>Weergave</dt><dd>${rendererText(s)}</dd>`}
             ${s.message && html`<dt>Melding</dt><dd>${s.message}</dd>`}
           </dl>
+          <${LiveControls} player=${p} ctl=${ctl} />
           <div class="form-grid">
             <label class="field">Playlist
               <select value=${p.follows_default ? 'default' : p.playlist_id} onChange=${(e) => patch(p, { playlist_id: e.target.value })}>
