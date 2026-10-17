@@ -111,7 +111,10 @@ def test_launcher_execs_cage_and_after_exit_counts_failures(tmp_path):
     env = _launcher_env(tmp_path, "#!/bin/bash\n"
                         f"echo \"$$ ${{WLR_NO_HARDWARE_CURSORS:-x}} ${{WLR_DRM_NO_ATOMIC:-x}} ${{WLR_RENDERER:-x}} "
                         f"${{LIBC_FATAL_STDERR_:-x}} $*\" >> {record}\n"
+                        f"echo \"runtime=$XDG_RUNTIME_DIR\" >> {record}\n"
                         "kill -ABRT $$\n")
+    (tmp_path / "rt").mkdir()
+    env.update(RUNTIME_DIRECTORY=str(tmp_path / "rt"), XDG_RUNTIME_DIR="/run/user/999")   # zoals PAM het zet
     state = tmp_path / "state"
     expected = ["x x x", "1 1 x", "1 1 pixman"]
     for attempt, want in enumerate(expected, 1):
@@ -122,6 +125,7 @@ def test_launcher_execs_cage_and_after_exit_counts_failures(tmp_path):
         pid, vars_ = calls[-1].split(" ", 1)
         assert vars_.startswith(want + " 1 -s"), calls[-1]          # varianten + LIBC_FATAL_STDERR_
         assert "--renderer browser" in vars_
+        assert f"runtime={tmp_path / 'rt'}" in record.read_text(), "Wayland-socket in de eigen runtimemap"
         assert (state / "browser-start").exists()
         after = dict(env, SERVICE_RESULT="signal", EXIT_CODE="killed", EXIT_STATUS="ABRT")
         subprocess.run(["bash", os.path.join(HERE_BIN, "signage-player-after-exit")], env=after, check=True,

@@ -1,5 +1,14 @@
 # Wijzigingen
 
+## 1.5.4 — de echte oorzaak: Wayland-socket kon niet worden aangemaakt
+
+Met de volledige uitvoer van 1.5.3 werd de oorzaak zichtbaar: cage kon zijn Wayland-socket niet
+aanmaken in `/run/user/999` ("unable to open lockfile … check permissions", "Unable to open Wayland
+socket") en brak daarna af. De PAM-sessie zet `XDG_RUNTIME_DIR` op `/run/user/<uid>`, maar de
+service maakt `/run/user` ontoegankelijk (`ProtectHome=yes`). De browserweergave gebruikt nu de
+eigen runtimemap van de service (`/run/signage-player`). In de eerdere test op de Pi (zonder
+`ProtectHome`) werkte alles daarom wel.
+
 ## 1.5.3 — browserweergave start weer op de Pi (Trixie, cage 0.3)
 
 Gevonden met tests op de Pi zelf: cage 0.3.1, de player en Chromium werken prima als cage
