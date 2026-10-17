@@ -281,9 +281,16 @@ def register(app):
                  "all": ["signage-server.service", "signage-player.service"]}.get(unit)
         if units is None:
             raise ApiError(400, "Onbekend logboek.")
+        # Per service: de systemd-meldingen (UNIT), de regels van de service zelf
+        # (_SYSTEMD_UNIT) en, voor de player, de vaste logboeknaam (zie signage-player.service).
         cmd = ["journalctl", "--no-pager", "-o", "short-iso", "-n", str(lines)]
+        matches = []
         for u in units:
-            cmd += ["-u", u]
+            matches += [f"_SYSTEMD_UNIT={u}", f"UNIT={u}"]
+            if u == "signage-player.service":
+                matches.append("SYSLOG_IDENTIFIER=signage-player")
+        for i, m in enumerate(matches):
+            cmd += (["+"] if i else []) + [m]
         try:
             res = subprocess.run(cmd, capture_output=True, timeout=10, check=False)
             text = res.stdout.decode("utf-8", "replace")

@@ -1,5 +1,19 @@
 # Wijzigingen
 
+## 1.5.2 — logboek van de player weer zichtbaar
+
+Aanleiding: ook met 1.5.1 bleef de foutmelding van de browserweergave leeg, en in het logboek
+stonden alleen de meldingen van systemd, geen enkele regel van de player zelf.
+
+- **Regels van de player ontbraken in het logboek**: door de sessie op tty1 (PAM) komen de processen
+  van de player in een logind-sessie terecht; hun regels staan dan niet onder
+  `journalctl -u signage-player`. De service heeft nu een vaste logboeknaam
+  (`SyslogIdentifier=signage-player`, terug te vinden met `journalctl -t signage-player`), en de
+  logboeken in de website, `signage-admin logs` en de foutmelding zoeken op unit én op die naam.
+- **Fatale fouten van glibc** (abort) gingen naar de terminal (tty1, dus alleen het scherm) in plaats
+  van naar het logboek; cage start nu met `LIBC_FATAL_STDERR_=1`.
+- De foutmelding vermeldt ook de versie van cage.
+
 ## 1.5.1 — browserweergave: veiligere varianten en volledige foutmelding
 
 Aanleiding: op een Pi 3B+ met Raspberry Pi OS 13 (Trixie, cage + Chromium 155) stopte de

@@ -25,6 +25,10 @@ TTYVTDisallocate=yes
 StandardInput=tty-fail
 StandardOutput=journal
 StandardError=journal
+# Vaste naam in het logboek. Door de sessie op tty1 (PAM) komen de processen van de player in
+# een logind-sessie terecht en staan hun regels niet altijd onder '-u signage-player.service';
+# met deze naam zijn ze altijd terug te vinden:  journalctl -t signage-player
+SyslogIdentifier=signage-player
 UtmpIdentifier=tty1
 UtmpMode=user
 Environment=PYTHONPATH=/opt/signage/current/app

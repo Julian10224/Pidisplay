@@ -142,7 +142,8 @@ PY
         echo "Herstart."
         ;;
     logs)
-        exec journalctl -u signage-server.service -u signage-player.service -f -n 100 ;;
+        exec journalctl -f -n 100 _SYSTEMD_UNIT=signage-server.service + UNIT=signage-server.service \
+            + _SYSTEMD_UNIT=signage-player.service + UNIT=signage-player.service + SYSLOG_IDENTIFIER=signage-player ;;
     *)
         usage; exit 2 ;;
 esac

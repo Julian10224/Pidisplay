@@ -39,7 +39,7 @@ keep_lines() {
 diagnose() {
     echo "Signage:   $(cat /opt/signage/current/VERSION 2>/dev/null || echo '?')"
     echo "Systeem:   $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}") · kernel $(uname -r) · $(tr -d '\0' 2>/dev/null < /proc/device-tree/model || uname -m)"
-    echo "cage:      $(command -v cage || echo ontbreekt)"
+    echo "cage:      $(command -v cage || echo ontbreekt) $(cage -v 2>&1 | head -n 1)"
     local cb
     cb="$(command -v chromium || command -v chromium-browser || true)"
     echo "Chromium:  ${cb:-ontbreekt} $( [ -n "$cb" ] && timeout 5 "$cb" --version 2>/dev/null | head -n 1)"
@@ -98,7 +98,9 @@ if [ "$mode" = browser ]; then
     # Uitvoer gaat naar het systeemlogboek en (de eerste 3000 regels, direct weggeschreven)
     # naar een bestand in het geheugen voor de foutmelding in de website.
     : > "$OUT" 2>/dev/null || OUT=/dev/null
-    env "${vars[@]}" cage "${opts[@]}" -- "$PY" -m signage.player.daemon --renderer browser \
+    # LIBC_FATAL_STDERR_: glibc schrijft fatale fouten (abort) anders naar de terminal (tty1,
+    # dus alleen op het scherm) in plaats van naar het logboek.
+    env LIBC_FATAL_STDERR_=1 "${vars[@]}" cage "${opts[@]}" -- "$PY" -m signage.player.daemon --renderer browser \
         > >(tee -p >(keep_lines 3000 "$OUT")) 2>&1 &
     child=$!
     trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 0' TERM INT
@@ -122,7 +124,8 @@ if [ "$mode" = browser ]; then
             cat "$OUT" 2>/dev/null
             if [ ! -s "$OUT" ] && command -v journalctl >/dev/null 2>&1; then
                 echo "(geen uitvoer opgevangen; laatste regels uit het systeemlogboek:)"
-                journalctl -u signage-player.service -b -n 60 --no-pager -o short-monotonic 2>&1 | tail -n 60
+                journalctl -b -n 60 --no-pager -o short-monotonic _SYSTEMD_UNIT=signage-player.service \
+                    + UNIT=signage-player.service + SYSLOG_IDENTIFIER=signage-player 2>&1 | tail -n 60
             fi
         } > "$LAST_FAIL.tmp" 2>&1
         chmod 0644 "$LAST_FAIL.tmp" 2>/dev/null
