@@ -233,6 +233,22 @@ if [ ${#BROWSER_PKGS[@]} -gt 0 ]; then
     fi
     if [ ${#BMISSING[@]} -eq 0 ]; then
         c_ok "Browserweergave beschikbaar (cage + Chromium)"
+        # Lettertypen voor HTML-pagina's: kleuren-emoji (☀️ 🌧️ …) en Arial-compatibele letters.
+        FMISSING=()
+        for p in fonts-noto-color-emoji fonts-liberation; do
+            dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || FMISSING+=("$p")
+        done
+        if [ ${#FMISSING[@]} -gt 0 ] && [ $OFFLINE = 0 ]; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${FMISSING[@]}" >/dev/null 2>&1 \
+                && c_ok "Lettertypen voor HTML-pagina's geïnstalleerd (emoji, Arial-compatibel)" \
+                || c_warn "Lettertypen (${FMISSING[*]}) konden niet worden geïnstalleerd; emoji in HTML-pagina's kunnen ontbreken."
+        fi
+        # Optioneel: wlr-randr om de resolutie van de browserweergave in te stellen (1280x720).
+        if ! command -v wlr-randr >/dev/null 2>&1 && [ $OFFLINE = 0 ]; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends wlr-randr >/dev/null 2>&1 \
+                && c_ok "wlr-randr geïnstalleerd (resolutie van de browserweergave instelbaar)" \
+                || c_warn "wlr-randr kon niet worden geïnstalleerd; de resolutie van de browserweergave is niet instelbaar."
+        fi
     else
         c_warn "Browserweergave niet beschikbaar (ontbreekt: ${BMISSING[*]}); de player gebruikt mpv (geen HTML)."
     fi

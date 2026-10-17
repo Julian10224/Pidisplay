@@ -1,5 +1,29 @@
 # Wijzigingen
 
+## 1.6.0 — lichtere browserweergave
+
+Aanleiding: de browserweergave draait op de Pi, maar met 35% overgeslagen videoframes.
+
+- **Nooit meer dan 2 video's tegelijk geladen.** De videochip van de Pi 3B+ decodeert hooguit
+  2 video's tegelijk (Chromium: "Too many decoder instances, max=2"); een derde video ging naar
+  de processor. Overgangsvideo's worden nu pas geladen als het item ervoor begint en direct na
+  gebruik vrijgegeven; tijdens een overgang wordt de vorige video vrijgegeven en pas dan het
+  volgende item geladen. Nog steeds zonder zwart beeld (gemeten in Chromium).
+- **Resolutie van de browserweergave instelbaar** (*Instellingen → Weergave*): automatisch,
+  1280×720 of 1920×1080. Bij 1280×720 tekent de Pi ruim de helft minder beeldpunten; de tv
+  schaalt op. Werkt via `wlr-randr` (output management van cage); de installer installeert dat.
+  `browser_resolution` in `player.ini`.
+- **Diagnose op het dashboard**: of Chromium met de GPU tekent (en welke), en of H.264 1080p via
+  de videochip wordt gedecodeerd.
+- **Emoji en Arial in HTML-pagina's**: de installer zet bij de browserweergave ook
+  `fonts-noto-color-emoji` en `fonts-liberation` neer (Raspberry Pi OS Lite heeft geen emoji-letters;
+  weericoontjes als ☀️ en 🌧️ bleven daardoor leeg).
+- **Overgangen bij willekeurige volgorde**: nieuwe test met video's, een HTML-pagina en een foto
+  in willekeurige volgorde: vóór elk item (ook het eerste van de playlist en bij elke nieuwe ronde)
+  speelt de overgang. Een overgang die op de Pi werd overgeslagen kwam waarschijnlijk door de
+  derde video zonder decoder (zie boven); als het nog gebeurt, staat de reden als
+  "Overgang … overgeslagen" in het logboek.
+
 ## 1.5.4 — de echte oorzaak: Wayland-socket kon niet worden aangemaakt
 
 Met de volledige uitvoer van 1.5.3 werd de oorzaak zichtbaar: cage kon zijn Wayland-socket niet

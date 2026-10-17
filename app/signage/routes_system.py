@@ -93,6 +93,7 @@ def _renderer_info(cfg):
     except OSError:
         pass
     return {"setting": (pcfg.get("renderer") or "auto").strip().lower(), "browser_failures": fails,
+            "resolution": (pcfg.get("browser_resolution") or "auto").strip().lower(),
             "fallback_active": fails >= 3, "browser_installed": browser_installed,
             "last_failure": last_failure, "last_failure_at": last_failure_at}
 
@@ -256,6 +257,14 @@ def register(app):
             raise ApiError(400, "Ongeldige actie.")
         state().priv("player", action)
         return jsonify(ok=True)
+
+    @app.post("/api/system/resolution")
+    def system_resolution():
+        value = str(body().get("resolution", ""))
+        if value not in ("auto", "1280x720", "1920x1080"):
+            raise ApiError(400, "Ongeldige resolutie.")
+        state().priv("set-resolution", value, timeout=60)
+        return jsonify(ok=True, renderer=_renderer_info(state().cfg))
 
     @app.post("/api/system/renderer")
     def system_renderer():

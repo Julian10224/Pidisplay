@@ -351,6 +351,7 @@ class BrowserRenderer:
         self.server = None
         self.commands = CommandBox()
         self.last_reported = None
+        self.res_note = None
         self.syncer = Syncer(pcfg, self.cache_dir, self.queue, self.status, on_command=self.commands.put)
 
     # -- status ------------------------------------------------------------------
@@ -388,11 +389,11 @@ class BrowserRenderer:
             elif phase:
                 state = "playing" if ps.get("current") else "starting"
             return {
-                "state": state, "phase": phase, "renderer": "browser",
+                "state": state, "phase": phase, "renderer": "browser", "renderer_note": self.res_note,
                 "current": ps.get("current") if not stale else None,
                 "playlist_id": playlist.get("id"), "revision": (self.cfg or {}).get("revision"),
                 "mpv_restarts": self.total_restarts, "errors": errors, "display": display_info(),
-                "viewport": ps.get("viewport"), "video_stats": ps.get("video_stats"),
+                "viewport": ps.get("viewport"), "video_stats": ps.get("video_stats"), "gpu": ps.get("gpu"),
                 "version": __version__, "uptime": time.time() - self.started,
                 "message": self.message or self.syncer.last_error,
                 "control": {"v": 1, "last": (ps.get("control") or {}).get("last") if isinstance(ps.get("control"), dict) else None},
@@ -530,6 +531,43 @@ class BrowserRenderer:
         self.ensure_browser()
         self.watchdog()
 
+    RESOLUTIONS = ("1280x720", "1920x1080")
+
+    def apply_resolution(self):
+        """Beeldresolutie van de browserweergave instellen (player.ini: browser_resolution).
+
+        Chromium op een Pi 3B+ tekent elk beeld met de processor/GPU; bij 1280x720 is dat
+        ruim de helft minder werk dan bij 1920x1080 (de tv schaalt het beeld op). Gaat via
+        wlr-randr (output management van cage, vanaf cage 0.1.5)."""
+        want = (self.pcfg.get("browser_resolution") or "auto").strip().lower()
+        if want not in self.RESOLUTIONS or not os.environ.get("WAYLAND_DISPLAY"):
+            return
+        tool = shutil.which("wlr-randr")
+        if not tool:
+            self.res_note = f"Resolutie {want} niet ingesteld: wlr-randr ontbreekt (sudo apt install wlr-randr)."
+            self.error(self.res_note)
+            return
+        try:
+            listing = subprocess.run([tool], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self.res_note = f"Resolutie {want} niet ingesteld: {exc}"
+            self.error(self.res_note)
+            return
+        outputs = [line.split()[0] for line in listing.splitlines() if line and not line[0].isspace()]
+        done, errors = [], []
+        for out in outputs:
+            res = subprocess.run([tool, "--output", out, "--mode", want], capture_output=True, text=True, timeout=15)
+            if res.returncode == 0:
+                done.append(out)
+            else:
+                errors.append(f"{out}: {(res.stderr or res.stdout).strip()[:200]}")
+        if done:
+            self.res_note = f"beeld op {want.replace('x', '×')} gezet"
+            log.info("Resolutie %s ingesteld op %s.", want, ", ".join(done))
+        else:
+            self.res_note = f"Resolutie {want} lukte niet: {'; '.join(errors) or 'geen scherm gevonden'}"
+            self.error(self.res_note)
+
     def run(self):
         signal.signal(signal.SIGTERM, lambda *_: setattr(self, "running", False))
         signal.signal(signal.SIGINT, lambda *_: setattr(self, "running", False))
@@ -539,6 +577,10 @@ class BrowserRenderer:
             self.apply(cached)
         self.start_server()
         self.syncer.start()
+        try:
+            self.apply_resolution()
+        except Exception as exc:  # noqa: BLE001
+            self.error(f"Resolutie instellen mislukt: {exc}")
         sd_notify("READY=1")
         log.info("Signage-player %s gestart (browserweergave, poort %d).", __version__, self.port)
         while self.running:

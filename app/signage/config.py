@@ -192,6 +192,7 @@ def read_player_config(path):
         "poll_interval": "5",
         "heartbeat_interval": "15",
         "renderer": "auto",
+        "browser_resolution": "auto",
         "local_port": "8765",
         "chromium_binary": "auto",
         "chromium_extra_args": "",

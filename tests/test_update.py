@@ -151,3 +151,36 @@ def test_after_exit_normal_stop_does_not_count(tmp_path):
     assert not (state / "browser-last-failure.log").exists()
     # zonder startbestand (mpv-weergave) gebeurt er niets
     subprocess.run(["bash", os.path.join(HERE_BIN, "signage-player-after-exit")], env=env, check=True, timeout=30)
+
+
+def test_browser_resolution_via_wlr_randr(tmp_path, monkeypatch):
+    from signage.config import read_player_config
+    from signage.player.browser import BrowserRenderer
+    fake = tmp_path / "fbin"
+    fake.mkdir()
+    calls = tmp_path / "calls.txt"
+    (fake / "wlr-randr").write_text(
+        "#!/bin/bash\n"
+        f"echo \"$*\" >> {calls}\n"
+        "if [ $# -eq 0 ]; then printf 'HDMI-A-1 \"Philips TV\"\\n  Enabled: yes\\n  Modes:\\n    1280x720 px\\n'; exit 0; fi\n"
+        "[ \"$4\" = 1280x720 ] && exit 0\n"
+        "echo 'unknown mode' >&2; exit 1\n")
+    (fake / "wlr-randr").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    ini = tmp_path / "p.ini"
+    for want, ok in (("1280x720", True), ("1920x1080", False)):
+        ini.write_text(f"[player]\ncache_dir = {tmp_path / 'c'}\nbrowser_resolution = {want}\n")
+        r = BrowserRenderer(read_player_config(str(ini)), launch_browser=False)
+        r.apply_resolution()
+        assert f"--output HDMI-A-1 --mode {want}" in calls.read_text()
+        if ok:
+            assert r.res_note == "beeld op 1280×720 gezet" and not r.errors
+            assert r.status()["renderer_note"] == "beeld op 1280×720 gezet"
+        else:
+            assert "lukte niet" in r.res_note and "unknown mode" in r.res_note
+    # 'auto' doet niets
+    ini.write_text(f"[player]\ncache_dir = {tmp_path / 'c'}\nbrowser_resolution = auto\n")
+    calls.write_text("")
+    BrowserRenderer(read_player_config(str(ini)), launch_browser=False).apply_resolution()
+    assert calls.read_text() == ""

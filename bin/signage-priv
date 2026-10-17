@@ -133,6 +133,33 @@ def player(action):
         die("Ongeldige actie.", 2)
 
 
+def _set_player_ini(key, value):
+    path = "/etc/signage/player.ini"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        die(f"{path} kan niet worden gelezen: {exc}")
+    new, n = re.subn(r"(?m)^" + re.escape(key) + r"\s*=.*$", f"{key} = {value}", text, count=1)
+    if n == 0:
+        new = text.rstrip("\n") + f"\n{key} = {value}\n"
+    tmp = path + ".signage-tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new)
+    st = os.stat(path)
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.chmod(tmp, st.st_mode & 0o777)
+    os.replace(tmp, path)
+
+
+def set_resolution(value):
+    """Beeldresolutie van de browserweergave (auto, 1280x720, 1920x1080); player herstart."""
+    if value not in ("auto", "1280x720", "1920x1080"):
+        die("Ongeldige resolutie.", 2)
+    _set_player_ini("browser_resolution", value)
+    run("systemctl", "restart", "signage-player.service")
+
+
 def set_renderer(value):
     """Weergave van de lokale player kiezen (auto/browser/mpv) of de automatische terugval wissen."""
     if value not in ("auto", "browser", "mpv", "reset"):
@@ -389,6 +416,7 @@ def main(argv):
         "set-time": (1, set_time),
         "player": (1, player),
         "set-renderer": (1, set_renderer),
+        "set-resolution": (1, set_resolution),
         "update": (0, update),
         "splash": (0, splash),
         "splash-sync": (0, lambda: splash(wait=True)),

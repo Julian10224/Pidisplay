@@ -279,6 +279,7 @@ def test_all_switches_with_transitions(rig):
     p = rig.probe()
     assert p["blank"] == 0, p
     assert p.get("transitionHidden", 0) == 0 and p.get("transitionFrames", 0) > 0, p
+    assert p["maxVideos"] <= 2, f"meer dan 2 video's tegelijk geladen: {p['maxVideos']}"
 
 
 def test_missing_and_broken_transitions_are_skipped(rig, tmp_path):
@@ -711,3 +712,40 @@ def test_live_next_keeps_shuffle_rounds(rig):
     assert sum(r == names for r in rounds) <= 1, rounds
     assert rig.js("window.__signage.snapshot()")["current"]["shuffle"] is True
     assert rig.probe()["blank"] == 0
+
+
+def test_never_more_than_two_videos_loaded(rig):
+    """De Pi 3B+ decodeert hooguit 2 video's tegelijk in hardware: video → overgang → video
+    mag nooit 3 geladen video's geven, en er mag geen zwart beeld ontstaan."""
+    items = [rig.item("video", "portrait.webm", transition="T"), rig.item("video", "landscape.webm", transition="T"),
+             rig.item("image", "small.png", duration=1, transition="T"), rig.item("video", "short.webm", transition="T")]
+    rig.write(items, transitions=rig.transition())
+    rig.start()
+    rig.wait_playing("portrait.webm", timeout=60, count=2)
+    p = rig.probe()
+    assert p["maxVideos"] <= 2, p
+    assert p["blank"] == 0, p
+    names = _names(rig)
+    assert names[:4] == ["portrait.webm", "landscape.webm", "small.png", "short.webm"], names
+    trans = [h for h in rig.history() if h["state"] == "PLAYING_TRANSITION"]
+    assert len(trans) >= 4, "elke overgang speelde"
+
+
+def test_shuffle_mixed_always_transition(rig):
+    """Willekeurige volgorde met video's, een HTML-pagina en een foto, elk met overgang: vóór
+    élk item (ook het eerste item van de playlist en bij het begin van een nieuwe ronde) speelt
+    de overgang."""
+    items = [rig.item("video", "landscape.webm", transition="T", item_id=1),
+             rig.item("html", "page", duration=1.5, transition="T", item_id=2),
+             rig.item("image", "small.png", duration=1, transition="T", item_id=3),
+             rig.item("video", "short.webm", transition="T", item_id=4)]
+    rig.write(items, transitions=rig.transition(), shuffle=True)
+    rig.start()
+    rig.wait_playing("landscape.webm", timeout=90, count=4)
+    states = [(h["state"], h["name"]) for h in rig.history() if h["state"] in ("PLAYING", "PLAYING_TRANSITION")]
+    plays = [n for s, n in states if s == "PLAYING"]
+    assert len(plays) >= 9, states
+    for a, b in zip(states, states[1:]):
+        assert not (a[0] == b[0] == "PLAYING"), f"'{b[1]}' zonder overgang na '{a[1]}': {states}"
+    p = rig.probe()
+    assert p["blank"] == 0 and p["maxVideos"] <= 2, p

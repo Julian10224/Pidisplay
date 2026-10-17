@@ -331,7 +331,10 @@ standaardinstellingen van nieuwere mpv-versies (Raspberry Pi OS Trixie) zijn te 
 van de Pi 3B+ bij 1080p (`render_quality = fast` in `player.ini`; `default` = de standaard van mpv).
 Het dashboard toont bij *Weergave* in beide weergaven het percentage overgeslagen videoframes;
 blijft dat boven een paar procent, gebruik dan 720p-video's.
-Of video's in Chromium op de Pi 3B+ hardwarematig worden gedecodeerd is niet getest (zie §18).
+In de browserweergave (Chromium) helpt vooral *Instellingen → Weergave → Resolutie van de
+browserweergave: 1280×720*. Het dashboard toont daar ook of Chromium met de GPU tekent en of
+H.264 via de videochip gaat. Er zijn nooit meer dan 2 video's tegelijk geladen (de grens van de
+videochip van de Pi 3B+).
 
 ---
 

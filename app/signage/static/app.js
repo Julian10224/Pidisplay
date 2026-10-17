@@ -321,6 +321,13 @@ function rendererText(st) {
     const vs = st.video_stats;
     if (vs && vs.total > 50) parts.push(`${(100 * vs.dropped / vs.total).toFixed(1).replace('.', ',')}% videoframes overgeslagen`);
     if (st.viewport && st.viewport.screen_w) parts.push(`${st.viewport.screen_w}×${st.viewport.screen_h}`);
+    const g = st.gpu || {};
+    if (g.renderer) {
+      const soft = /swiftshader|llvmpipe|softpipe|software|geen webgl/i.test(g.renderer);
+      parts.push(soft ? `tekenen zonder GPU (${g.renderer})` : `GPU: ${g.renderer}`);
+    }
+    if (g.h264_hw === true) parts.push('H.264 via de videochip');
+    else if (g.h264_hw === false) parts.push('H.264 zonder videochip (zwaar)');
   } else if (st.renderer === 'mpv') {
     parts.push('mpv (foto, video; geen HTML)');
     const vs = st.video_stats;
@@ -1627,6 +1634,15 @@ function SettingsPage({ user, onLogout }) {
                 ${info.renderer.fallback_active && html`<button class="btn" disabled=${!priv || busy === 'renderer'}
                   onClick=${() => run('renderer', async () => { const r = await api('POST', '/api/system/renderer', { renderer: 'reset' }); setInfo({ ...info, renderer: r.renderer }); }, 'Browserweergave wordt opnieuw geprobeerd.')}>Browserweergave opnieuw proberen</button>`}
               </div>
+              ${info.renderer.browser_installed && html`<label class="field">Resolutie van de browserweergave
+                <select value=${info.renderer.resolution || 'auto'} disabled=${!priv || busy === 'resolution'}
+                  onChange=${(e) => run('resolution', async () => { const r = await api('POST', '/api/system/resolution', { resolution: e.target.value }); setInfo({ ...info, renderer: r.renderer }); }, 'Resolutie opgeslagen; de player herstart.')}>
+                  <option value="auto">Automatisch (resolutie van het scherm)</option>
+                  <option value="1280x720">1280×720: lichter, vloeiender video op een Pi 3B+</option>
+                  <option value="1920x1080">1920×1080</option>
+                </select>
+                <span class="muted small">Bij 1280×720 tekent de Pi ruim de helft minder beeldpunten; de tv schaalt het beeld op.
+                  Op het dashboard zie je het percentage overgeslagen videoframes.</span></label>`}
               ${!info.renderer.browser_installed && html`<p class="muted small">De browserweergave (Chromium en cage) is niet geïnstalleerd; de player gebruikt mpv. Installeer opnieuw zonder <code>--no-browser</code> om HTML te kunnen tonen.</p>`}
               ${info.renderer.fallback_active && html`<div class="notice warning"><${Icon} name="alert" /><span>De browserweergave startte drie keer niet; de player is automatisch overgeschakeld op mpv. HTML-pagina's worden overgeslagen. Hieronder staat de foutmelding van de laatste poging. Los de oorzaak op (of werk de software bij) en kies daarna <b>Browserweergave opnieuw proberen</b>.</span></div>`}
               ${info.renderer.last_failure && html`<details open=${info.renderer.fallback_active}>

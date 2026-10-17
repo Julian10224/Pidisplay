@@ -368,7 +368,7 @@ def register(app):
         if not isinstance(data, dict):
             raise ApiError(400, "Verwacht JSON.")
         allowed = ("state", "current", "playlist_id", "revision", "mpv_restarts", "errors", "display",
-                   "version", "uptime", "message", "renderer", "phase", "video_stats", "viewport", "hwdec",
+                   "version", "uptime", "message", "renderer", "phase", "video_stats", "viewport", "hwdec", "gpu",
                    "renderer_note", "control")
         status = {k: data.get(k) for k in allowed if k in data}
         if "control" in status:

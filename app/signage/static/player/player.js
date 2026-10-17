@@ -36,7 +36,10 @@ const TEST = new URLSearchParams(location.search).has('test');
 const POLL_MS = 2000;
 const STATUS_MS = 3000;
 const PREPARE_TIMEOUT = 20000;
-const TRANSITION_READY_TIMEOUT = 3000;
+const TRANSITION_READY_TIMEOUT = 5000;
+// De videochip van de Pi 3B+ decodeert hooguit 2 video's tegelijk (Chromium: "Too many
+// decoder instances, max=2"); een derde video valt terug op de processor en hapert.
+const MAX_VIDEOS = 2;
 const STANDBY_RETRY = 30000;
 const HTML_READY_MAX = 4000;
 
@@ -221,36 +224,50 @@ function prepare(item, conf) {
   return makeSlot(item, { muted: !!((c.playlist || {}).mute), volume: c.volume == null ? 80 : c.volume }).promise;
 }
 
-// Overgangen: elke overgangsvideo heeft een vaste, vooraf geladen laag.
+/* Aantal geladen video's (elke geladen video houdt een decoder van de videochip bezet). */
+function liveVideos() { return stage.querySelectorAll('video[src]').length; }
+
+// Overgangen. Een overgangsvideo wordt pas geladen als het item dat ervoor speelt begint
+// (armTransition) en direct na gebruik weer vrijgegeven (releaseTransition), zodat er nooit
+// meer dan 2 video's tegelijk een decoder bezetten.
 function syncTransitions(conf) {
   const wanted = (conf && conf.transitions) || {};
   const keep = new Set();
   [cfg, pending, conf].forEach((c) => { if (c && c.transitions) Object.keys(c.transitions).forEach((k) => keep.add(k)); });
   for (const id of Object.keys(tslots)) {
-    if (!keep.has(id) && (!activeTransition || activeTransition.id !== id)) { destroySlot(tslots[id].slot); delete tslots[id]; }
+    if (!keep.has(id) && (!activeTransition || activeTransition.id !== id)) { releaseTransition(tslots[id]); delete tslots[id]; }
   }
   const muted = !!((conf.playlist || {}).mute);
   const vol = Math.max(0, Math.min(1, (conf.volume == null ? 80 : conf.volume) / 100));
   for (const [id, t] of Object.entries(wanted)) {
-    if (tslots[id] && tslots[id].src === t.src) {
-      const m = tslots[id].slot.media;   // volume en geluid volgen gewijzigde instellingen
+    const e = tslots[id];
+    if (e && e.src === t.src) {
+      e.muted = muted; e.volume = vol;
+      const m = e.slot && e.slot.media;   // volume en geluid volgen gewijzigde instellingen
       if (m) { m.muted = muted; m.volume = vol; }
       continue;
     }
-    if (tslots[id]) destroySlot(tslots[id].slot);
-    const slot = makeSlot({ kind: 'video', src: t.src, name: 'overgang ' + (t.name || ''), scale: conf.scale_default },
-      { muted: !!((conf.playlist || {}).mute), volume: conf.volume });
-    const entry = { id, src: t.src, slot, name: t.name, duration: t.video_duration, failed: false };
-    entry.ready = slot.promise.catch((e) => { entry.failed = true; log('Overgang ' + (t.name || id) + ' niet beschikbaar: ' + e.message); throw e; });
-    entry.ready.catch(() => {});
-    tslots[id] = entry;
+    if (e && e !== activeTransition) releaseTransition(e);
+    tslots[id] = { id, src: t.src, name: t.name, duration: t.video_duration, scale: conf.scale_default,
+      muted, volume: vol, slot: null, ready: null, failed: false };
   }
 }
 
-function rearmTransition(t) {
-  if (!t || t.slot.destroyed) return;
-  hideSlot(t.slot);
-  try { t.slot.media.pause(); t.slot.media.currentTime = 0; } catch (e) { /* genegeerd */ }
+function armTransition(t) {
+  if (!t || (t.slot && !t.slot.destroyed)) return;
+  const slot = makeSlot({ kind: 'video', src: t.src, name: 'overgang ' + (t.name || ''), scale: t.scale },
+    { muted: t.muted, volume: Math.round(t.volume * 100) });
+  t.slot = slot;
+  t.failed = false;
+  t.ready = slot.promise.catch((e) => { t.failed = true; log('Overgang ' + (t.name || t.id) + ' niet beschikbaar: ' + e.message); throw e; });
+  t.ready.catch(() => {});
+}
+
+function releaseTransition(t) {
+  if (!t || !t.slot) return;
+  destroySlot(t.slot);
+  t.slot = null;
+  t.ready = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +354,9 @@ function schedulePreload(opts, target) {
   const key = keyOf(item);
   if (preload && preload.key === key) return;
   cancelPreload();
+  // Geen derde video tegelijk: dan wordt de volgende video pas geladen zodra de huidige
+  // (of de overgang) is vrijgegeven.
+  if (item.kind === 'video' && liveVideos() >= MAX_VIDEOS) return;
   // Voorbereiden met de instellingen (volume, mute) van de playlist waar het item bij hoort.
   const promise = prepare(item, p.conf);
   promise.catch(() => {});
@@ -408,9 +428,13 @@ async function startNext(g, item, slot) {
   const old = current;
   current = { item, slot, started: performance.now() };
   if (old && old.slot !== slot) destroySlot(old.slot);
-  if (activeTransition) { rearmTransition(activeTransition); activeTransition = null; }
+  if (activeTransition) { releaseTransition(activeTransition); activeTransition = null; }
   hideFallback();
   clearTimers();
+  // De overgang na dit item alvast laden; andere geladen overgangen vrijgeven.
+  const nextT = item.transition ? tslots[item.transition] : null;
+  Object.values(tslots).forEach((t) => { if (t !== nextT) releaseTransition(t); });
+  armTransition(nextT);
   const top = played[played.length - 1];
   if (!top || top.list !== items || top.idx !== index) { played.push({ list: items, idx: index, fb: fallbackActive }); }
   if (played.length > 50) played.shift();
@@ -445,7 +469,7 @@ async function itemDone(g, forced) {
   const t = tid ? tslots[tid] : null;
   if (!t) { advance(g, forced); return; }
   setState(S.PREPARE_TRANSITION, t.name);
-  schedulePreload(null, forced);
+  armTransition(t);           // normaal al geladen bij de start van het item
   try {
     await timeout(t.ready, TRANSITION_READY_TIMEOUT, 'overgang');
   } catch (e) {
@@ -462,14 +486,20 @@ async function itemDone(g, forced) {
     await v.play();
   } catch (e) {
     if (g !== gen) return;
-    rearmTransition(t);
+    releaseTransition(t);
     log(`Overgang '${t.name || tid}' start niet: ${e.message}`);
     advance(g, forced);
     return;
   }
-  if (g !== gen) { rearmTransition(t); return; }
+  if (g !== gen) { releaseTransition(t); return; }
   activeTransition = t;
   setState(S.PLAYING_TRANSITION, t.name);
+  // De overgang bedekt nu het scherm: de video van het vorige item vrijgeven en het
+  // volgende item voorbereiden terwijl de overgang speelt.
+  await frames(2);
+  if (g !== gen || state !== S.PLAYING_TRANSITION) return;
+  if (current && current.slot && current.slot.kind === 'video') destroySlot(current.slot);
+  schedulePreload(null, forced);
   // De overgangsvideo blijft bestaan; alle luisteraars en timers van deze ronde worden
   // daarna verwijderd, zodat er bij langdurig afspelen niets ophoopt.
   const ac = new AbortController();
@@ -498,7 +528,7 @@ function showStandby(g, reason) {
   const src = cfg && cfg.standby_src;
   const done = () => {
     if (old) destroySlot(old.slot);
-    if (activeTransition) { rearmTransition(activeTransition); activeTransition = null; }
+    if (activeTransition) { releaseTransition(activeTransition); activeTransition = null; }
   };
   if (src) {
     makeSlot({ kind: 'image', src, scale: 'contain', name: 'standby' }, {}).promise.then((slot) => {
@@ -649,7 +679,13 @@ function control(cmd) {
   const g = ++gen;
   clearTimers();
   failures = 0;
-  if (withTransition) itemDone(g, target); else advance(g, target);
+  if (withTransition) {
+    itemDone(g, target);
+  } else {
+    // Geen overgang: geladen overgangen vrijgeven, zodat het gekozen item een decoder heeft.
+    Object.values(tslots).forEach((t) => { if (t !== activeTransition) releaseTransition(t); });
+    advance(g, target);
+  }
   return 'ok';
 }
 
@@ -690,6 +726,27 @@ async function poll() {
   setTimeout(poll, POLL_MS);
 }
 
+/* Eenmalig: tekent Chromium met de GPU (en welke), en decodeert het H.264 1080p30 in hardware?
+   Zichtbaar op het dashboard bij 'Weergave'. */
+const gpuInfo = { renderer: null, h264_hw: null };
+try {
+  const c = document.createElement('canvas');
+  const gl = c.getContext('webgl');
+  if (gl) {
+    const ext = gl.getExtension('WEBGL_debug_renderer_info');
+    gpuInfo.renderer = String(ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)).slice(0, 120);
+    const lose = gl.getExtension('WEBGL_lose_context');
+    if (lose) lose.loseContext();
+  } else {
+    gpuInfo.renderer = 'geen WebGL';
+  }
+} catch (e) { /* genegeerd */ }
+if (navigator.mediaCapabilities && navigator.mediaCapabilities.decodingInfo) {
+  navigator.mediaCapabilities.decodingInfo({ type: 'file', video: { contentType: 'video/mp4; codecs="avc1.640028"',
+    width: 1920, height: 1080, bitrate: 8000000, framerate: 30 } })
+    .then((r) => { gpuInfo.h264_hw = !!(r && r.supported && r.powerEfficient); }, () => {});
+}
+
 function snapshot() {
   const cur = current && !current.standby ? current.item : null;
   let vs = { dropped: videoStats.dropped, total: videoStats.total };
@@ -708,6 +765,7 @@ function snapshot() {
     } : null,
     control: { v: 1, last: lastControl },
     errors: errors.slice(),
+    gpu: gpuInfo,
     viewport: { w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio,
       screen_w: Math.round(screen.width * window.devicePixelRatio), screen_h: Math.round(screen.height * window.devicePixelRatio) },
     video_stats: vs,
@@ -745,6 +803,7 @@ if (TEST) {
       return true;
     });
     if (visible) probe.started = true;
+    probe.maxVideos = Math.max(probe.maxVideos || 0, liveVideos());
     if (probe.started) {
       probe.frames++;
       if (!visible && document.getElementById('fallback').hidden) { probe.blank++; probe.blankAt.push(state); }
