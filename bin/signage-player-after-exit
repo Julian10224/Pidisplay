@@ -1,0 +1,68 @@
+#!/bin/bash
+# Na het stoppen van signage-player.service (ExecStopPost): stopte de browserweergave binnen
+# 30 seconden door een fout, dan wordt dat geteld (na 3 keer: mpv), krijgt de volgende start
+# een veiligere variant van de compositor, en komt er een foutmelding met de laatste uitvoer
+# en sessie-/systeeminformatie in /var/lib/signage/player/browser-last-failure.log.
+#
+# systemd geeft SERVICE_RESULT, EXIT_CODE en EXIT_STATUS mee. Een gewone stop of herstart
+# (SERVICE_RESULT=success) telt niet als fout.
+set -u
+STATE_DIR="${SIGNAGE_PLAYER_STATE_DIR:-/var/lib/signage/player}"
+FAILS_FILE="$STATE_DIR/browser-failures"
+VARIANT_FILE="$STATE_DIR/browser-variant"
+START_FILE="$STATE_DIR/browser-start"
+LAST_FAIL="$STATE_DIR/browser-last-failure.log"
+
+[ -f "$START_FILE" ] || exit 0          # mpv-weergave of oude versie: niets te doen
+read -r start variant < "$START_FILE" || exit 0
+rm -f "$START_FILE"
+[[ "$start" =~ ^[0-9]+$ ]] && [[ "$variant" =~ ^[0-2]$ ]] || exit 0
+ran=$(( $(date +%s) - start ))
+result="${SERVICE_RESULT:-unknown}"
+fails="$(cat "$FAILS_FILE" 2>/dev/null || echo 0)"
+[[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+
+if [ "$result" = success ] || [ "$ran" -ge 30 ]; then
+    echo 0 > "$FAILS_FILE"
+    [ "$variant" -gt 0 ] && [ "$ran" -ge 30 ] && echo "signage-player: variant $variant van de compositor werkt; die blijft in gebruik."
+    exit 0
+fi
+
+diagnose() {
+    echo "Signage:   $(cat /opt/signage/current/VERSION 2>/dev/null || echo '?')"
+    echo "Systeem:   $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}") · kernel $(uname -r) · $(tr -d '\0' 2>/dev/null < /proc/device-tree/model || uname -m)"
+    echo "cage:      $(command -v cage || echo ontbreekt) $(cage -v 2>&1 | head -n 1)"
+    local cb
+    cb="$(command -v chromium || command -v chromium-browser || true)"
+    echo "Chromium:  ${cb:-ontbreekt} $( [ -n "$cb" ] && timeout 5 "$cb" --version 2>/dev/null | head -n 1)"
+    echo "Gebruiker: $(id)"
+    echo "Sessie:    XDG_SESSION_ID=${XDG_SESSION_ID:-} XDG_SEAT=${XDG_SEAT:-} XDG_VTNR=${XDG_VTNR:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
+    echo "DRM:       $(ls -l /dev/dri 2>&1 | tail -n +2 | awk '{print $1, $3, $4, $NF}' | tr '\n' ';')"
+    echo "HDMI:      $(for f in /sys/class/drm/*/status; do printf '%s=%s ' "$(basename "$(dirname "$f")")" "$(cat "$f")"; done 2>/dev/null)"
+    echo "Geheugen:  $(awk '/MemTotal|MemAvailable|CmaTotal|CmaFree/ {printf "%s %d MB  ", $1, $2/1024}' /proc/meminfo)"
+}
+
+echo $(( fails + 1 )) > "$FAILS_FILE"
+[ "$variant" -lt 2 ] && echo $(( variant + 1 )) > "$VARIANT_FILE"
+status="${EXIT_STATUS:-?}"
+why=""
+case "$status" in
+    ABRT|6) why=" (afgebroken, abort)" ;; SEGV|11) why=" (geheugenfout, segfault)" ;;
+    134) why=" (afgebroken, abort)" ;; 139) why=" (geheugenfout, segfault)" ;;
+esac
+line="Browserweergave stopte na ${ran} s: ${EXIT_CODE:-?} ${status}${why}, resultaat ${result} (poging $(( fails + 1 )) van 3, variant $variant)"
+echo "signage-player: $line"
+{
+    echo "$line — $(date '+%Y-%m-%d %H:%M:%S')"
+    echo
+    diagnose
+    echo
+    echo "--- Uitvoer van cage, Chromium en de player (systeemlogboek) ---"
+    if command -v journalctl >/dev/null 2>&1; then
+        journalctl -b --no-pager -o short-monotonic --since "@$start" -n 150 \
+            SYSLOG_IDENTIFIER=signage-player 2>&1 | grep -v "render/egl.c" | tail -n 100
+    fi
+} > "$LAST_FAIL.tmp" 2>&1
+chmod 0644 "$LAST_FAIL.tmp" 2>/dev/null
+mv -f "$LAST_FAIL.tmp" "$LAST_FAIL"
+exit 0

@@ -40,6 +40,8 @@ RuntimeDirectory=signage-player
 RuntimeDirectoryMode=0700
 # Releases zonder startscript (1.0.x, na 'signage-admin rollback') starten de player direct.
 ExecStart=/bin/sh -c 'if [ -x /opt/signage/current/bin/signage-player-launch ]; then exec /opt/signage/current/bin/signage-player-launch; else exec /usr/bin/python3 -m signage.player.daemon; fi'
+# Na het stoppen: een te snel gestopte browserweergave tellen en de foutmelding maken.
+ExecStopPost=-/bin/sh -c 'if [ -x /opt/signage/current/bin/signage-player-after-exit ]; then exec /opt/signage/current/bin/signage-player-after-exit; fi'
 # De daemon meldt zich elke halve seconde; blijft dat 60 s uit, dan herstart systemd de player.
 WatchdogSec=60
 Restart=always

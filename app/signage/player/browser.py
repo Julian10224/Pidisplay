@@ -45,10 +45,13 @@ MIME = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".m
 
 CHROMIUM_FLAGS = [
     "--kiosk", "--no-first-run", "--no-default-browser-check", "--noerrdialogs", "--disable-infobars",
-    "--disable-session-crashed-bubble", "--disable-features=Translate,MediaRouter,OptimizationHints",
+    "--disable-session-crashed-bubble",
+    "--disable-features=Translate,TranslateUI,MediaRouter,OptimizationHints",
     "--autoplay-policy=no-user-gesture-required", "--check-for-update-interval=31536000",
     "--disable-component-update", "--disable-background-networking", "--disable-sync",
     "--disable-default-apps", "--disable-breakpad", "--password-store=basic", "--disable-pinch",
+    # Geen 'pagina vertalen'-balk: de pagina is Nederlands, de browser ook.
+    "--lang=nl", "--accept-lang=nl,en",
     "--overscroll-history-navigation=0", "--force-device-scale-factor=1", "--hide-scrollbars",
     "--disk-cache-size=67108864", "--disable-extensions",
     # Elke site in een eigen renderproces: een vastgelopen HTML-pagina (localhost) kan de
@@ -397,13 +400,20 @@ class BrowserRenderer:
 
     # -- Chromium ----------------------------------------------------------------
     def _mark_clean_exit(self, profile):
-        """Voorkom de melding 'Chromium is niet correct afgesloten' na een stroomstoring."""
+        """Voorkom de melding 'Chromium is niet correct afgesloten' na een stroomstoring, en
+        zet de vertaalfunctie uit (anders verschijnt rechtsboven een 'vertalen'-balkje)."""
         pref = os.path.join(profile, "Default", "Preferences")
         try:
-            with open(pref, encoding="utf-8") as fh:
-                data = json.load(fh)
+            os.makedirs(os.path.dirname(pref), exist_ok=True)
+            try:
+                with open(pref, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except FileNotFoundError:
+                data = {}
             data.setdefault("profile", {})["exit_type"] = "Normal"
             data["profile"]["exited_cleanly"] = True
+            data.setdefault("translate", {})["enabled"] = False
+            data.setdefault("intl", {})["accept_languages"] = "nl,en"
             with open(pref + ".tmp", "w", encoding="utf-8") as fh:
                 json.dump(data, fh)
             os.replace(pref + ".tmp", pref)

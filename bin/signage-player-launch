@@ -9,10 +9,9 @@
 # dan valt dit script automatisch terug op mpv, zodat het scherm niet zwart blijft.
 # Terugzetten: sudo signage-admin renderer reset
 #
-# Stopt de browserweergave te snel, dan schrijft dit script de laatste uitvoer van cage,
-# Chromium en de player plus wat sessie- en systeeminformatie naar
-# /var/lib/signage/player/browser-last-failure.log. De beheerwebsite toont dat bestand onder
-# Instellingen → Weergave, zodat de oorzaak zonder SSH te zien is.
+# Stopt de browserweergave te snel, dan telt signage-player-after-exit (ExecStopPost) dat en
+# schrijft de laatste uitvoer van cage, Chromium en de player plus sessie- en systeeminformatie
+# naar /var/lib/signage/player/browser-last-failure.log (zichtbaar in Instellingen → Weergave).
 set -u
 
 PY=/usr/bin/python3
@@ -20,39 +19,9 @@ export PYTHONPATH="${PYTHONPATH:-/opt/signage/current/app}"
 CFG="${SIGNAGE_PLAYER_CONFIG:-/etc/signage/player.ini}"
 STATE_DIR="${SIGNAGE_PLAYER_STATE_DIR:-/var/lib/signage/player}"
 FAILS_FILE="$STATE_DIR/browser-failures"
-LAST_FAIL="$STATE_DIR/browser-last-failure.log"
 VARIANT_FILE="$STATE_DIR/browser-variant"
-OUT="${XDG_RUNTIME_DIR:-/tmp}/browser-output.txt"
+START_FILE="$STATE_DIR/browser-start"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
-
-# Eerste N regels direct (regel voor regel) naar een bestand schrijven, de rest negeren.
-# Niet met awk/head: die bufferen, en zolang de player-daemon na een crash van cage nog
-# draait blijft de pijp open en zou er niets in het bestand komen.
-keep_lines() {
-    local n=0 line
-    exec 3>>"$2"
-    while IFS= read -r line; do
-        if [ "$n" -lt "$1" ]; then printf '%s\n' "$line" >&3; n=$((n + 1)); fi
-    done
-}
-
-diagnose() {
-    echo "Signage:   $(cat /opt/signage/current/VERSION 2>/dev/null || echo '?')"
-    echo "Systeem:   $(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-?}") · kernel $(uname -r) · $(tr -d '\0' 2>/dev/null < /proc/device-tree/model || uname -m)"
-    echo "cage:      $(command -v cage || echo ontbreekt) $(cage -v 2>&1 | head -n 1)"
-    local cb
-    cb="$(command -v chromium || command -v chromium-browser || true)"
-    echo "Chromium:  ${cb:-ontbreekt} $( [ -n "$cb" ] && timeout 5 "$cb" --version 2>/dev/null | head -n 1)"
-    echo "Gebruiker: $(id)"
-    echo "Sessie:    XDG_SESSION_ID=${XDG_SESSION_ID:-} XDG_SEAT=${XDG_SEAT:-} XDG_VTNR=${XDG_VTNR:-} XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-}"
-    if [ -n "${XDG_SESSION_ID:-}" ] && command -v loginctl >/dev/null 2>&1; then
-        echo "logind:    $(loginctl show-session "$XDG_SESSION_ID" -p Active -p State -p Seat -p VTNr -p TTY -p Type -p Class 2>&1 | tr '\n' ' ')"
-    fi
-    echo "Console:   actieve VT $(cat /sys/class/tty/tty0/active 2>/dev/null || echo '?')"
-    echo "DRM:       $(ls -l /dev/dri 2>&1 | tail -n +2 | awk '{print $1, $3, $4, $NF}' | tr '\n' ';')"
-    echo "HDMI:      $(for f in /sys/class/drm/*/status; do printf '%s=%s ' "$(basename "$(dirname "$f")")" "$(cat "$f")"; done 2>/dev/null)"
-    echo "Geheugen:  $(awk '/MemTotal|MemAvailable|CmaTotal|CmaFree/ {printf "%s %d MB  ", $1, $2/1024}' /proc/meminfo)"
-}
 
 renderer="$("$PY" -c 'import configparser,sys
 c = configparser.ConfigParser(interpolation=None); c.read(sys.argv[1])
@@ -94,50 +63,17 @@ if [ "$mode" = browser ]; then
     # Na een mislukte start uitgebreid loggen (als deze cage-versie dat kan).
     if [ "$fails" -gt 0 ] && cage -h 2>&1 | grep -q -- '-D'; then opts+=(-D); fi
     echo "signage-player-launch: browserweergave starten (variant $variant${vars[*]:+: ${vars[*]}})." >&2
-    start=$(date +%s)
-    # Uitvoer gaat naar het systeemlogboek en (de eerste 3000 regels, direct weggeschreven)
-    # naar een bestand in het geheugen voor de foutmelding in de website.
-    : > "$OUT" 2>/dev/null || OUT=/dev/null
-    # LIBC_FATAL_STDERR_: glibc schrijft fatale fouten (abort) anders naar de terminal (tty1,
-    # dus alleen op het scherm) in plaats van naar het logboek.
-    env LIBC_FATAL_STDERR_=1 "${vars[@]}" cage "${opts[@]}" -- "$PY" -m signage.player.daemon --renderer browser \
-        > >(tee -p >(keep_lines 3000 "$OUT")) 2>&1 &
-    child=$!
-    trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 0' TERM INT
-    wait "$child"
-    rc=$?
-    ran=$(( $(date +%s) - start ))
-    if [ "$ran" -lt 30 ]; then
-        echo $(( fails + 1 )) > "$FAILS_FILE"
-        [ "$variant" -lt 2 ] && echo $(( variant + 1 )) > "$VARIANT_FILE"
-        why=""
-        [ "$rc" -gt 128 ] && why=" (signaal $(( rc - 128 ))$( [ "$rc" = 134 ] && echo ': afgebroken (abort)')$( [ "$rc" = 139 ] && echo ': geheugenfout (segfault)'))"
-        echo "signage-player-launch: browserweergave stopte na ${ran}s met exitcode $rc$why (poging $(( fails + 1 )) van 3, variant $variant)." >&2
-        sleep 1
-        {
-            echo "Browserweergave stopte na ${ran} s met exitcode $rc$why (poging $(( fails + 1 )) van 3, variant $variant) — $(date '+%Y-%m-%d %H:%M:%S')"
-            [ ${#vars[@]} -gt 0 ] && echo "Omgeving: ${vars[*]}"
-            echo
-            diagnose
-            echo
-            echo "--- Uitvoer van cage, Chromium en de player ---"
-            cat "$OUT" 2>/dev/null
-            if [ ! -s "$OUT" ] && command -v journalctl >/dev/null 2>&1; then
-                echo "(geen uitvoer opgevangen; laatste regels uit het systeemlogboek:)"
-                journalctl -b -n 60 --no-pager -o short-monotonic _SYSTEMD_UNIT=signage-player.service \
-                    + UNIT=signage-player.service + SYSLOG_IDENTIFIER=signage-player 2>&1 | tail -n 60
-            fi
-        } > "$LAST_FAIL.tmp" 2>&1
-        chmod 0644 "$LAST_FAIL.tmp" 2>/dev/null
-        mv -f "$LAST_FAIL.tmp" "$LAST_FAIL" 2>/dev/null
-        sed -n '1,/^--- /p' "$LAST_FAIL" >&2 2>/dev/null
-    else
-        echo 0 > "$FAILS_FILE"
-        [ "$variant" -gt 0 ] && echo "signage-player-launch: variant $variant werkt; die blijft in gebruik." >&2
-    fi
-    exit "$rc"
+    # Starttijd en variant voor signage-player-after-exit (ExecStopPost), dat een te snelle
+    # stop telt en de foutmelding voor de website maakt.
+    printf '%s %s\n' "$(date +%s)" "$variant" > "$START_FILE"
+    # cage wordt het hoofdproces van de service (exec), met tty1 als invoer en de uitvoer
+    # rechtstreeks in het logboek. Als achtergrondproces van dit script (tot 1.5.2) brak cage
+    # op een Pi 3B+ met Trixie (cage 0.3.1) direct af; rechtstreeks gestart werkte het wel.
+    # LIBC_FATAL_STDERR_: fatale glibc-fouten naar het logboek in plaats van alleen naar tty1.
+    exec env LIBC_FATAL_STDERR_=1 "${vars[@]}" cage "${opts[@]}" -- "$PY" -m signage.player.daemon --renderer browser
 fi
 
+rm -f "$START_FILE"
 if [ -n "$note" ]; then
     echo "signage-player-launch: $note" >&2
     exec "$PY" -m signage.player.daemon --renderer mpv --note "$note"

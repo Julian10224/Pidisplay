@@ -87,56 +87,63 @@ def test_renderer_info_shows_last_failure(client):
     assert r["fallback_active"] and "wlroots" in r["last_failure"] and r["last_failure_at"] > 0
 
 
-def test_launcher_saves_failure_output(tmp_path):
-    """signage-player-launch bewaart de uitvoer van een mislukte browserstart (nagebootste cage)."""
-    import subprocess
-    here = os.path.dirname(os.path.abspath(__file__))
+def _launcher_env(tmp_path, cage_script):
     fake = tmp_path / "bin"
-    fake.mkdir()
-    (fake / "cage").write_text("#!/bin/bash\necho '[ERROR] [libseat] Could not activate session: Permission denied' >&2\n"
-                               "echo 'Unable to create the wlroots backend' >&2\nexit 1\n")
-    (fake / "chromium").write_text("#!/bin/bash\necho 'Chromium 130.0'\n")
-    for f in fake.iterdir():
-        f.chmod(0o755)
-    (tmp_path / "p.ini").write_text("[player]\nrenderer = browser\n")
-    state = tmp_path / "state"
-    env = dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}", SIGNAGE_PLAYER_CONFIG=str(tmp_path / "p.ini"),
-               SIGNAGE_PLAYER_STATE_DIR=str(state), XDG_RUNTIME_DIR=str(tmp_path))
-    launcher = os.path.join(here, "..", "bin", "signage-player-launch")
-    for attempt in (1, 2, 3):
-        res = subprocess.run(["bash", launcher], env=env, capture_output=True, text=True, timeout=60)
-        assert res.returncode == 1
-        # de uitvoer gaat nog steeds naar het logboek (stderr/stdout van de service)
-        assert "wlroots backend" in res.stdout + res.stderr
-        assert (state / "browser-failures").read_text().strip() == str(attempt)
-    text = (state / "browser-last-failure.log").read_text()
-    assert "poging 3 van 3" in text and "Could not activate session" in text and "Chromium 130.0" in text
-    assert "Sessie:" in text and "DRM:" in text
-
-
-def test_launcher_variants_and_capture_with_lingering_child(tmp_path):
-    """cage breekt af (exitcode 134) terwijl de player-daemon nog even doorleeft: de uitvoer
-    moet toch bewaard worden, en elke volgende start probeert een veiligere variant."""
-    import subprocess
-    here = os.path.dirname(os.path.abspath(__file__))
-    fake = tmp_path / "bin"
-    fake.mkdir()
-    (fake / "cage").write_text("#!/bin/bash\n( sleep 3 ) &\n"
-                               "echo \"env: ${WLR_NO_HARDWARE_CURSORS:-x} ${WLR_DRM_NO_ATOMIC:-x} ${WLR_RENDERER:-x}\" >&2\n"
-                               "echo 'wlr_output_init: Assertion failed.' >&2\nkill -ABRT $$\n")
+    fake.mkdir(exist_ok=True)
+    (fake / "cage").write_text(cage_script)
     (fake / "chromium").write_text("#!/bin/bash\necho 'Chromium 155.0'\n")
     for f in fake.iterdir():
         f.chmod(0o755)
     (tmp_path / "p.ini").write_text("[player]\nrenderer = browser\n")
+    return dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}", SIGNAGE_PLAYER_CONFIG=str(tmp_path / "p.ini"),
+                SIGNAGE_PLAYER_STATE_DIR=str(tmp_path / "state"), XDG_RUNTIME_DIR=str(tmp_path))
+
+
+HERE_BIN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bin")
+
+
+def test_launcher_execs_cage_and_after_exit_counts_failures(tmp_path):
+    """De launcher start cage als hoofdproces (exec, met de oorspronkelijke stdin); na een te
+    snelle, mislukte stop telt signage-player-after-exit dat, kiest de volgende variant en
+    schrijft de foutmelding."""
+    import subprocess
+    record = tmp_path / "cage-calls.txt"
+    env = _launcher_env(tmp_path, "#!/bin/bash\n"
+                        f"echo \"$$ ${{WLR_NO_HARDWARE_CURSORS:-x}} ${{WLR_DRM_NO_ATOMIC:-x}} ${{WLR_RENDERER:-x}} "
+                        f"${{LIBC_FATAL_STDERR_:-x}} $*\" >> {record}\n"
+                        "kill -ABRT $$\n")
     state = tmp_path / "state"
-    env = dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}", SIGNAGE_PLAYER_CONFIG=str(tmp_path / "p.ini"),
-               SIGNAGE_PLAYER_STATE_DIR=str(state), XDG_RUNTIME_DIR=str(tmp_path))
-    launcher = os.path.join(here, "..", "bin", "signage-player-launch")
     expected = ["x x x", "1 1 x", "1 1 pixman"]
     for attempt, want in enumerate(expected, 1):
-        res = subprocess.run(["bash", launcher], env=env, capture_output=True, text=True, timeout=60)
-        assert res.returncode == 134
+        res = subprocess.run(["bash", os.path.join(HERE_BIN, "signage-player-launch")], env=env,
+                             capture_output=True, text=True, timeout=60)
+        assert res.returncode == -6, res.stderr          # het launcher-proces zelf werd cage (exec)
+        calls = [c for c in record.read_text().strip().splitlines() if "--renderer browser" in c]
+        pid, vars_ = calls[-1].split(" ", 1)
+        assert vars_.startswith(want + " 1 -s"), calls[-1]          # varianten + LIBC_FATAL_STDERR_
+        assert "--renderer browser" in vars_
+        assert (state / "browser-start").exists()
+        after = dict(env, SERVICE_RESULT="signal", EXIT_CODE="killed", EXIT_STATUS="ABRT")
+        subprocess.run(["bash", os.path.join(HERE_BIN, "signage-player-after-exit")], env=after, check=True,
+                       capture_output=True, text=True, timeout=60)
+        assert (state / "browser-failures").read_text().strip() == str(attempt)
         text = (state / "browser-last-failure.log").read_text()
-        assert f"env: {want}" in text and "Assertion failed" in text, text
-        assert "signaal 6" in text and f"poging {attempt} van 3" in text
+        assert f"poging {attempt} van 3" in text and "afgebroken" in text and "Chromium 155.0" in text
+        assert not (state / "browser-start").exists()
     assert (state / "browser-variant").read_text().strip() == "2"
+
+
+def test_after_exit_normal_stop_does_not_count(tmp_path):
+    import subprocess
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "browser-failures").write_text("2\n")
+    import time as _t
+    (state / "browser-start").write_text(f"{int(_t.time())} 1\n")
+    env = dict(os.environ, SIGNAGE_PLAYER_STATE_DIR=str(state), SERVICE_RESULT="success", EXIT_CODE="exited",
+               EXIT_STATUS="0")
+    subprocess.run(["bash", os.path.join(HERE_BIN, "signage-player-after-exit")], env=env, check=True, timeout=30)
+    assert (state / "browser-failures").read_text().strip() == "0"
+    assert not (state / "browser-last-failure.log").exists()
+    # zonder startbestand (mpv-weergave) gebeurt er niets
+    subprocess.run(["bash", os.path.join(HERE_BIN, "signage-player-after-exit")], env=env, check=True, timeout=30)

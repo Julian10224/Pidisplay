@@ -1,5 +1,20 @@
 # Wijzigingen
 
+## 1.5.3 — browserweergave start weer op de Pi (Trixie, cage 0.3)
+
+Gevonden met tests op de Pi zelf: cage 0.3.1, de player en Chromium werken prima als cage
+rechtstreeks door systemd wordt gestart (video speelde), maar braken direct af (exitcode 134)
+als cage een achtergrondproces van `signage-player-launch` was.
+
+- **cage is nu het hoofdproces van de service** (`exec`), met tty1 als invoer en de uitvoer
+  rechtstreeks in het logboek — precies zoals in de geslaagde test.
+- Het tellen van mislukte starts, de veiligere varianten en de foutmelding voor de website
+  gebeuren nu ná het stoppen, in `signage-player-after-exit` (`ExecStopPost`). Een gewone stop
+  of herstart telt niet als fout.
+- **Geen 'vertalen'-balkje meer** rechtsboven in Chromium: de playerpagina is gemarkeerd als
+  Nederlands en niet te vertalen (`translate="no"`, `<meta name="google" content="notranslate">`),
+  Chromium start met `--lang=nl` en de vertaalfunctie staat uit in het profiel.
+
 ## 1.5.2 — logboek van de player weer zichtbaar
 
 Aanleiding: ook met 1.5.1 bleef de foutmelding van de browserweergave leeg, en in het logboek
