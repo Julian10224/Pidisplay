@@ -749,3 +749,39 @@ def test_shuffle_mixed_always_transition(rig):
         assert not (a[0] == b[0] == "PLAYING"), f"'{b[1]}' zonder overgang na '{a[1]}': {states}"
     p = rig.probe()
     assert p["blank"] == 0 and p["maxVideos"] <= 2, p
+
+
+def test_shuffle_round_survives_edit_and_restart(rig):
+    """Eerlijke willekeurige volgorde: een bewerking van de playlist of een herstart van de
+    player begint geen nieuwe ronde; eerst komen de items die in deze ronde nog niet speelden."""
+    names = ["portrait.png", "small.png", "landscape.jpg", "standby.png", "logo.png"]
+    items = [rig.item("image", n, duration=2, item_id=10 + i) for i, n in enumerate(names)]
+    rig.write(items, shuffle=True)
+    rig.start()
+
+    def wait_count(n, timeout=30):
+        end = time.time() + timeout
+        while len(_names(rig)) < n and time.time() < end:
+            time.sleep(0.05)
+        assert len(_names(rig)) >= n, _names(rig)
+
+    def done():
+        return rig.js("JSON.parse(localStorage.getItem('signage.shuffleRound')).done")
+
+    wait_count(2)
+    first = _names(rig)[:2]
+    rig.write(list(reversed(items)), shuffle=True)        # bewerkt (andere volgorde), zelfde playlist
+    wait_count(3)
+    seen = _names(rig)[:3]
+    assert len(set(seen)) == 3, seen                      # na de bewerking geen herhaling
+    played_keys = done()
+    assert len(played_keys) == 3, played_keys
+    rig.page.reload()
+    end = time.time() + 30
+    while len(_names(rig)) < 3 and time.time() < end:
+        time.sleep(0.05)
+    after = _names(rig)
+    rest = sorted(set(names) - set(seen))
+    assert sorted(after[:2]) == rest, (seen, after)       # eerst de rest van de ronde
+    assert len(set(after[2:7])) == 5 or len(after) < 7    # daarna een volledige nieuwe ronde
+    assert first == seen[:2]

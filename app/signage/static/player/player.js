@@ -291,13 +291,42 @@ function shuffled(list, avoidFirstId) {
   return a;
 }
 
+/* Willekeurige volgorde: welke items in de lopende ronde al speelden. Bewaard in de browser
+   (profiel op de SD-kaart), zodat een herstart van de player of een bewerking van de playlist
+   geen nieuwe ronde begint: eerst komt elk item één keer langs. */
+const ROUND_KEY = 'signage.shuffleRound';
+let round = loadRound();
+function loadRound() {
+  try {
+    const r = JSON.parse(localStorage.getItem(ROUND_KEY) || 'null');
+    if (r && Array.isArray(r.done)) return { pl: r.pl == null ? null : r.pl, done: r.done.map(String).slice(0, 5000) };
+  } catch (e) { /* geen opslag: alleen in het geheugen */ }
+  return { pl: null, done: [] };
+}
+function itemKey(it) { return it.item_id != null ? 'i' + it.item_id : 'm' + it.media_id; }
+function plId(conf) { return conf && conf.playlist ? conf.playlist.id : null; }
+function markPlayed(item) {
+  const key = itemKey(item), pl = plId(cfg);
+  // Speelt een item dat al geweest was, dan is er een nieuwe ronde begonnen.
+  if (round.pl !== pl || round.done.includes(key)) round = { pl, done: [] };
+  round.done.push(key);
+  try { localStorage.setItem(ROUND_KEY, JSON.stringify(round)); } catch (e) { /* genegeerd */ }
+}
+/* Items van de hoofdplaylist die in de lopende ronde nog niet speelden (alle als die er niet meer zijn). */
+function roundRest(base, conf) {
+  if (!conf || round.pl !== plId(conf)) return base;
+  const rest = base.filter((it) => !round.done.includes(itemKey(it)));
+  return rest.length ? rest : base;
+}
+
 /* Lijst voor de volgende ronde. Bij willekeurige volgorde één keer geschud per ronde
-   (gecachet), zodat voorladen en afspelen dezelfde keuze zien. */
-function nextRound(base, doShuffle, src) {
+   (gecachet), zodat voorladen en afspelen dezelfde keuze zien. 'conf' alleen voor de
+   hoofdplaylist: dan eerst wat in de lopende ronde nog niet speelde. */
+function nextRound(base, doShuffle, src, conf) {
   if (!doShuffle) return base;
   if (roundCache && roundCache.src === src && roundCache.base === base) return roundCache.list;
   const lastId = current && current.item ? current.item.media_id : null;
-  roundCache = { base, src, list: shuffled(base, lastId) };
+  roundCache = { base, src, list: shuffled(roundRest(base, conf), lastId) };
   return roundCache.list;
 }
 
@@ -308,7 +337,7 @@ function peekNext() {
     conf = pending;
     fb = false;
     if (isShuffle(pending, false)) {
-      list = nextRound(pending.items || [], true, pending);   // bewerkt + willekeurig: nieuwe ronde
+      list = nextRound(pending.items || [], true, pending, pending);   // bewerkt: de ronde loopt door
       idx = -1;
     } else {
       const curId = current && current.item.media_id;
@@ -326,7 +355,7 @@ function peekNext() {
       return { type: 'item', conf, list: nextRound(conf.fallback_items, isShuffle(conf, true), 'fallback'), idx: 0, fb: true };
     }
     const base = fb ? (conf.fallback_items || list) : (conf.items || list);
-    list = nextRound(base, isShuffle(conf, fb), list);
+    list = nextRound(base, isShuffle(conf, fb), list, fb ? null : conf);
     nxt = 0;
   }
   return { type: 'item', conf, list, idx: nxt, fb };
@@ -438,6 +467,7 @@ async function startNext(g, item, slot) {
   const top = played[played.length - 1];
   if (!top || top.list !== items || top.idx !== index) { played.push({ list: items, idx: index, fb: fallbackActive }); }
   if (played.length > 50) played.shift();
+  if (!fallbackActive && isShuffle(cfg, false)) markPlayed(item);
   setState(S.PLAYING, item.name);
   if (slot.kind === 'video') {
     if (endedEarly || slot.media.ended) { later(0, () => itemDone(g)); }
@@ -571,7 +601,7 @@ function restart(conf) {
   pending = null;
   roundCache = null;
   played = [];
-  items = isShuffle(conf, false) ? shuffled(conf.items || [], current && current.item ? current.item.media_id : null)
+  items = isShuffle(conf, false) ? shuffled(roundRest(conf.items || [], conf), current && current.item ? current.item.media_id : null)
     : (conf.items || []).slice();
   fallbackActive = false;
   index = -1;
@@ -613,12 +643,15 @@ function adoptPending() {
   roundCache = null;
   applyRotation();
   const base = conf.items || [];
-  items = isShuffle(conf, false) ? shuffled(base, cur ? cur.media_id : null) : base.slice();
-  index = cur ? items.findIndex((it) => it.item_id != null && it.item_id === cur.item_id) : -1;
-  if (index > 0 && isShuffle(conf, false)) {
-    // Nieuwe willekeurige ronde die met het huidige item begint: de andere items volgen nog.
-    [items[0], items[index]] = [items[index], items[0]];
-    index = 0;
+  if (isShuffle(conf, false)) {
+    // De ronde loopt door: het huidige item vooraan, daarna wat in deze ronde nog niet speelde.
+    const same = cur ? base.find((it) => it.item_id != null && it.item_id === cur.item_id) : null;
+    const rest = shuffled(roundRest(base, conf).filter((it) => it !== same), cur ? cur.media_id : null);
+    items = same ? [same, ...rest] : rest;
+    index = same ? 0 : -1;
+  } else {
+    items = base.slice();
+    index = cur ? items.findIndex((it) => it.item_id != null && it.item_id === cur.item_id) : -1;
   }
   fallbackActive = false;
   played = [];

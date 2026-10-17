@@ -95,7 +95,9 @@ def _launcher_env(tmp_path, cage_script):
     for f in fake.iterdir():
         f.chmod(0o755)
     (tmp_path / "p.ini").write_text("[player]\nrenderer = browser\n")
-    return dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}", SIGNAGE_PLAYER_CONFIG=str(tmp_path / "p.ini"),
+    env = {k: v for k, v in os.environ.items() if k != "NOTIFY_SOCKET"}
+    return dict(env, PATH=f"{fake}:{os.environ['PATH']}", SIGNAGE_PLAYER_CONFIG=str(tmp_path / "p.ini"),
+                PYTHONPATH=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "app"),
                 SIGNAGE_PLAYER_STATE_DIR=str(tmp_path / "state"), XDG_RUNTIME_DIR=str(tmp_path))
 
 
@@ -184,3 +186,73 @@ def test_browser_resolution_via_wlr_randr(tmp_path, monkeypatch):
     calls.write_text("")
     BrowserRenderer(read_player_config(str(ini)), launch_browser=False).apply_resolution()
     assert calls.read_text() == ""
+
+
+def _notify_listener(path):
+    import socket
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    s.bind(str(path))
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+    s.settimeout(0.2)
+    return s
+
+
+def _recv_all(s):
+    import socket
+    import struct
+    got = []
+    while True:
+        try:
+            data, anc, _f, _a = s.recvmsg(4096, socket.CMSG_SPACE(12))
+        except (socket.timeout, BlockingIOError):
+            return got
+        pid = None
+        for level, typ, cdata in anc:
+            if level == socket.SOL_SOCKET and typ == socket.SCM_CREDENTIALS:
+                pid = struct.unpack("iII", cdata[:12])[0]
+        got.append((data.decode(), pid))
+
+
+def test_notify_relay_forwards_daemon_messages_from_main_pid(tmp_path):
+    """Browserweergave: de meldingen van de daemon (kleinkind, buiten de service-cgroup door de
+    PAM-sessie) komen bij systemd aan als melding van het hoofdproces; MAINPID= niet."""
+    import subprocess
+    sock = _notify_listener(tmp_path / "notify.sock")
+    env = _launcher_env(tmp_path, "#!/bin/bash\n"
+                        "/usr/bin/python3 - <<'PY'\n"
+                        "import os, socket\n"
+                        "s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)\n"
+                        "s.connect(os.environ['NOTIFY_SOCKET'])\n"
+                        "s.sendall(b'READY=1')\n"
+                        "s.sendall(b'MAINPID=1\\nWATCHDOG=1')\n"
+                        "PY\n"
+                        "sleep 0.5\n"
+                        "kill -ABRT $$\n")
+    (tmp_path / "rt").mkdir()
+    env.update(RUNTIME_DIRECTORY=str(tmp_path / "rt"), NOTIFY_SOCKET=str(tmp_path / "notify.sock"))
+    proc = subprocess.Popen(["bash", os.path.join(HERE_BIN, "signage-player-launch")], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == -6, err                 # afloop van cage overgenomen
+    got = _recv_all(sock)
+    assert [m for m, _p in got] == ["READY=1", "WATCHDOG=1"], got
+    assert all(p == proc.pid for _m, p in got), (got, proc.pid)   # afzender = hoofdproces
+    assert not (tmp_path / "rt" / "notify-relay.sock").exists()
+
+
+def test_notify_relay_passes_sigterm_and_exit_code(tmp_path):
+    import signal
+    import subprocess
+    _notify_listener(tmp_path / "notify.sock")
+    env = _launcher_env(tmp_path, "#!/bin/bash\n"
+                        "trap 'echo kreeg-term; exit 0' TERM\n"
+                        "while :; do sleep 0.1; done\n")
+    (tmp_path / "rt").mkdir()
+    env.update(RUNTIME_DIRECTORY=str(tmp_path / "rt"), NOTIFY_SOCKET=str(tmp_path / "notify.sock"))
+    proc = subprocess.Popen(["bash", os.path.join(HERE_BIN, "signage-player-launch")], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    import time as _t
+    _t.sleep(1.5)
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0 and "kreeg-term" in out, (proc.returncode, out, err)

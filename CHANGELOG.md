@@ -1,5 +1,29 @@
 # Wijzigingen
 
+## 1.6.1 — browserweergave herstartte elke 90 seconden
+
+Uit het logboek van de Pi: `signage-player.service: start operation timed out. Terminating.`,
+direct gevolgd door Chromium's "Fatal Wayland communication error: Broken pipe" en
+"Chromium is gestopt (exitcode 0)". De player meldde zich nooit 'klaar' bij systemd, dus systemd
+brak de start na 90 s af en begon opnieuw.
+
+Oorzaak: door de PAM-sessie (nodig voor cage) verplaatst `pam_systemd` de processen naar een
+sessie-scope. systemd koppelt een melding (READY=1, WATCHDOG=1) aan de service via de cgroup van
+de afzender of via het hoofdproces; de daemon is geen van beide (hij draait onder cage), dus zijn
+meldingen gingen verloren. Bij mpv is de daemon zelf het hoofdproces; daar speelde dit niet.
+
+- Nieuw hoofdproces `signage.player.notifyrelay` bij de browserweergave: start cage, geeft de
+  daemon een eigen meldingssocket en stuurt READY/WATCHDOG/STOPPING door aan systemd (alleen
+  die meldingen). Signalen gaan door naar cage; de afloop van cage (exitcode of signaal) wordt
+  overgenomen, zodat de foutteller en de foutmelding van de browserweergave hetzelfde werken.
+- Getest: meldingen van een kleinkind komen aan met het PID van het hoofdproces; SIGTERM en
+  exitcode worden doorgegeven.
+- **Eerlijke willekeurige volgorde.** Elk item komt eerst één keer langs voordat een nieuwe ronde
+  begint, ook als de player herstart (zoals hierboven elke 90 s gebeurde) of de playlist wordt
+  bewerkt. Voorheen begon na een herstart of bewerking een volledig nieuwe ronde, waardoor de
+  items die vroeg in een ronde vielen vaker te zien waren. De lopende ronde wordt bewaard
+  (browserweergave: in het Chromium-profiel; mpv: `shuffle-round.json` in de playermap).
+
 ## 1.6.0 — lichtere browserweergave
 
 Aanleiding: de browserweergave draait op de Pi, maar met 35% overgeslagen videoframes.

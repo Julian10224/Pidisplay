@@ -66,8 +66,7 @@ if [ "$mode" = browser ]; then
     # Starttijd en variant voor signage-player-after-exit (ExecStopPost), dat een te snelle
     # stop telt en de foutmelding voor de website maakt.
     printf '%s %s\n' "$(date +%s)" "$variant" > "$START_FILE"
-    # cage wordt het hoofdproces van de service (exec), met tty1 als invoer en de uitvoer
-    # rechtstreeks in het logboek.
+    # cage draait met tty1 als invoer en de uitvoer rechtstreeks in het logboek.
     # LIBC_FATAL_STDERR_: fatale glibc-fouten naar het logboek in plaats van alleen naar tty1.
     # XDG_RUNTIME_DIR: de PAM-sessie zet die op /run/user/<uid>, maar de service maakt /run/user
     # ontoegankelijk (ProtectHome=yes). Daar kon cage zijn Wayland-socket niet aanmaken ("unable
@@ -76,7 +75,11 @@ if [ "$mode" = browser ]; then
     if [ -n "${RUNTIME_DIRECTORY:-}" ] && [ -d "${RUNTIME_DIRECTORY%%:*}" ]; then
         export XDG_RUNTIME_DIR="${RUNTIME_DIRECTORY%%:*}"
     fi
-    exec env LIBC_FATAL_STDERR_=1 "${vars[@]}" cage "${opts[@]}" -- "$PY" -m signage.player.daemon --renderer browser
+    # notifyrelay: hoofdproces dat cage start en de systemd-meldingen (READY=1, WATCHDOG=1) van de
+    # daemon doorgeeft. Door de PAM-sessie zit de daemon niet in de service-cgroup; zonder
+    # doorgeefluik kwam READY=1 nooit aan en herstartte systemd de player na 90 s.
+    exec env LIBC_FATAL_STDERR_=1 "${vars[@]}" "$PY" -m signage.player.notifyrelay -- \
+        cage "${opts[@]}" -- "$PY" -m signage.player.daemon --renderer browser
 fi
 
 rm -f "$START_FILE"

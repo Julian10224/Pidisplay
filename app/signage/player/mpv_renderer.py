@@ -26,6 +26,7 @@ geladen; daarna loopt de playlist gewoon verder vanaf dat item.
 """
 
 import hashlib
+import json
 import logging
 import os
 import queue
@@ -105,6 +106,10 @@ class MpvRenderer:
         self.video_loaded = False     # speelt er nu een video (voor de framemeting)?
         self.video_stats = {"dropped": 0, "total": 0}
         self.syncer = Syncer(pcfg, self.cache_dir, self.queue, self.status, on_command=self.commands.put)
+        # Willekeurige volgorde: welke items in de lopende ronde al speelden (ook na een herstart
+        # van de player of een bewerking van de playlist), zodat elk item eerst één keer langskomt.
+        self.round_file = os.path.join(self.cache_dir, "shuffle-round.json")
+        self.round = self._load_round()
 
     # Compatibiliteit met 1.0 (tests en logboeken gebruiken 'mode').
     @property
@@ -187,7 +192,7 @@ class MpvRenderer:
                      (cfg.get("playlist") or {}).get("name") or "-", len(cfg.get("items") or []))
             self.cfg = cfg
             self.pending = None
-            self.items = self._round(cfg.get("items") or [], self._shuffle(cfg, False))
+            self.items = self._round(cfg.get("items") or [], self._shuffle(cfg, False), cfg)
             self.fallback_active = False
             self.index = -1
             self.consecutive_failures = 0
@@ -409,6 +414,8 @@ class MpvRenderer:
             self.played.append((self.items, self.index, self.fallback_active))
             self.played = self.played[-50:]
         self.set_state("PLAYING", item.get("name"))
+        if not self.fallback_active and self._shuffle(self.cfg, False):
+            self._mark_played(item)
         if item.get("kind") == "image":
             self.deadline = self.loaded_at + float(item.get("duration") or 10)
         else:
@@ -437,7 +444,7 @@ class MpvRenderer:
             cur_id = (self.current or {}).get("media_id")
             nxt = 0
             if self._shuffle(new, False):
-                new_items = self._round(new.get("items") or [], True)   # bewerkt + willekeurig: nieuwe ronde
+                new_items = self._round(new.get("items") or [], True, new)   # bewerkt: ronde loopt door
             else:
                 new_items = list(new.get("items") or [])
                 if 0 <= self.index < len(new_items) and new_items[self.index].get("media_id") == cur_id:
@@ -468,7 +475,7 @@ class MpvRenderer:
             return 0
         if self._shuffle(self.cfg, self.fallback_active):
             base = (self.cfg or {}).get("fallback_items" if self.fallback_active else "items") or self.items
-            self.items = self._round(base, True)
+            self.items = self._round(base, True, None if self.fallback_active else self.cfg)
         return 0
 
     @staticmethod
@@ -476,8 +483,43 @@ class MpvRenderer:
         pl = (cfg or {}).get("playlist") or {}
         return bool(pl.get("fallback_shuffle") if fallback else pl.get("shuffle"))
 
-    def _round(self, base, shuffle):
+    @staticmethod
+    def _item_key(it):
+        return f"i{it['item_id']}" if it.get("item_id") is not None else f"m{it.get('media_id')}"
+
+    def _load_round(self):
+        try:
+            with open(self.round_file, encoding="utf-8") as fh:
+                r = json.load(fh)
+            if isinstance(r, dict) and isinstance(r.get("done"), list):
+                return {"pl": r.get("pl"), "done": [str(k) for k in r["done"]][:5000]}
+        except (OSError, ValueError):
+            pass
+        return {"pl": None, "done": []}
+
+    def _mark_played(self, item):
+        """Item speelde in de lopende willekeurige ronde. Speelt een item dat al geweest was,
+        dan is er een nieuwe ronde begonnen."""
+        pl, key = self._playlist_id(self.cfg), self._item_key(item)
+        if self.round["pl"] != pl or key in self.round["done"]:
+            self.round = {"pl": pl, "done": []}
+        self.round["done"].append(key)
+        try:
+            tmp = self.round_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.round, fh)
+            os.replace(tmp, self.round_file)
+        except OSError:
+            pass
+
+    def _round(self, base, shuffle, cfg=None):
+        """Lijst voor een (deel)ronde. Met 'cfg' (hoofdplaylist): eerst de items die in de lopende
+        ronde nog niet speelden; zijn die er niet meer, dan een volledige nieuwe ronde."""
         items = list(base)
+        if shuffle and cfg is not None and self.round["pl"] == self._playlist_id(cfg):
+            rest = [it for it in items if self._item_key(it) not in self.round["done"]]
+            if rest:
+                items = rest
         if shuffle and len(items) > 1:
             random.shuffle(items)
             last = (self.current or {}).get("media_id")
@@ -549,7 +591,13 @@ class MpvRenderer:
         cur = self.current or {}
         base = new.get("items") or []
         self.cfg = new
-        self.items = self._round(base, True) if self._shuffle(new, False) else list(base)
+        if self._shuffle(new, False):
+            # De ronde loopt door: het huidige item vooraan, daarna wat in deze ronde nog niet speelde.
+            same = [it for it in base if it.get("item_id") is not None and it.get("item_id") == cur.get("item_id")]
+            rest = [it for it in self._round(base, True, new) if not same or it is not same[0]]
+            self.items = same[:1] + rest
+        else:
+            self.items = list(base)
         self.index = next((i for i, it in enumerate(self.items)
                            if it.get("item_id") is not None and it.get("item_id") == cur.get("item_id")), -1)
         if self.index > 0 and self._shuffle(new, False):

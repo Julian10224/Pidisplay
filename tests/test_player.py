@@ -432,3 +432,31 @@ def test_mpv_counts_dropped_frames_and_uses_fast_render(tmp_path, fake_log, monk
         assert "--scale=bilinear" in pt.player.mpv.build_args() and "--dither-depth=no" in pt.player.mpv.build_args()
     finally:
         pt.stop()
+
+
+def test_mpv_shuffle_round_survives_restart(tmp_path, fake_log):
+    """Na een herstart van de player eerst de items die in de lopende ronde nog niet speelden."""
+    _ini, player_ini = make_config(tmp_path, port=free_port())
+    names = [f"f{i}.png" for i in range(5)]
+    items = [{"media_id": str(i), "item_id": 10 + i, "name": n, "kind": "image", "local": img(tmp_path, n),
+              "duration": 0.6} for i, n in enumerate(names)]
+    write_cache(str(tmp_path / "player-cache"), items,
+                playlist={"id": 1, "name": "T", "repeat_mode": "loop", "mute": False, "shuffle": True})
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: len(loads(fake_log)) >= 2, timeout=20)
+    finally:
+        pt.stop()
+    with open(tmp_path / "player-cache" / "shuffle-round.json") as fh:
+        done = json.load(fh)["done"]
+    before = len(loads(fake_log))
+    assert 2 <= len(done) <= 4 and len(done) == before, (done, loads(fake_log))
+    rest = sorted(n for i, n in enumerate(names) if f"i{10 + i}" not in done)
+    pt = PlayerThread(player_ini).start()
+    try:
+        assert wait_for(lambda: len(loads(fake_log)) >= before + len(rest) + 5, timeout=30)
+        after = loads(fake_log)[before:]
+        assert sorted(after[:len(rest)]) == rest, (done, after)
+        assert sorted(after[len(rest):len(rest) + 5]) == sorted(names), after     # daarna een hele ronde
+    finally:
+        pt.stop()

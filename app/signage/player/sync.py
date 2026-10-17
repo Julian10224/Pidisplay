@@ -33,7 +33,12 @@ KICK_MIN_GAP = 0.3     # minimaal zoveel seconden tussen twee extra statusmeldin
 def sd_notify(message):
     addr = os.environ.get("NOTIFY_SOCKET")
     if not addr:
-        return
+        # Browserweergave: mocht de compositor NOTIFY_SOCKET niet doorgeven, dan het
+        # doorgeefluik (signage.player.notifyrelay) in de runtimemap gebruiken.
+        relay = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/nonexistent", "notify-relay.sock")
+        if not os.path.exists(relay):
+            return
+        addr = relay
     if addr.startswith("@"):
         addr = "\0" + addr[1:]
     try:

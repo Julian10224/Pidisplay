@@ -12,7 +12,8 @@ StartLimitBurst=10
 
 [Service]
 Type=notify
-# De daemon draait als kindproces van cage en meldt zich zelf bij systemd.
+# Bij de browserweergave draait de daemon onder cage; zijn meldingen gaan via het hoofdproces
+# (signage.player.notifyrelay) naar systemd.
 NotifyAccess=all
 User=signage
 Group=signage
